@@ -24,6 +24,7 @@ import net.minecraft.network.NetworkingBackend;
 import net.minecraft.network.NetworkSide;
 import net.minecraft.network.listener.PacketListener;
 import net.minecraft.network.packet.c2s.login.LoginHelloC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerLoadedC2SPacket;
 import net.minecraft.network.packet.s2c.play.CommonPlayerSpawnInfo;
 import net.minecraft.network.packet.s2c.play.GameJoinS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlayerRespawnS2CPacket;
@@ -375,8 +376,11 @@ public class DummyManager {
         dummySession.networkHandler = handler;
         dummySession.name = handler.getProfile().name();
 
-        // The vanilla handler sends PlayerLoadedC2SPacket once initial chunk loading finishes.
-        accessor.setLoaded(false);
+        // Tell the server the player finished loading chunks and can move/spawn
+        accessor.setLoaded(true);
+        if (handler.getConnection() != null && handler.getConnection().isOpen()) {
+            handler.getConnection().send(new PlayerLoadedC2SPacket());
+        }
         accessor.setSecureChatEnforced(packet.enforcesSecureChat());
 
         if (controllingDummy) {
@@ -476,7 +480,10 @@ public class DummyManager {
         newWorld.addEntity(newPlayer);
         interactionManager.copyAbilities(newPlayer);
         interactionManager.setGameModes(spawnInfo.gameMode(), spawnInfo.lastGameMode());
-        accessor.setLoaded(false);
+        accessor.setLoaded(true);
+        if (handler.getConnection() != null && handler.getConnection().isOpen()) {
+            handler.getConnection().send(new PlayerLoadedC2SPacket());
+        }
 
         dummySession.player = newPlayer;
         dummySession.interactionManager = interactionManager;
@@ -565,7 +572,10 @@ public class DummyManager {
         newWorld.addEntity(newPlayer);
         interactionManager.copyAbilities(newPlayer);
         interactionManager.setGameModes(spawnInfo.gameMode(), spawnInfo.lastGameMode());
-        accessor.setLoaded(false);
+        accessor.setLoaded(true);
+        if (handler.getConnection() != null && handler.getConnection().isOpen()) {
+            handler.getConnection().send(new PlayerLoadedC2SPacket());
+        }
 
         mainSession.player = newPlayer;
         mainSession.world = newWorld;
