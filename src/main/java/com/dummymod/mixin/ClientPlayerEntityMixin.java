@@ -18,15 +18,9 @@ public class ClientPlayerEntityMixin {
     private void dummymod$treatSessionPlayersAsLocal(
             CallbackInfoReturnable<Boolean> cir
     ) {
-        ClientPlayerEntity player =
-                (ClientPlayerEntity) (Object) this;
-
-        cir.setReturnValue(
-                player == (
-                        DummyManager.isControllingDummy()
-                                ? DummyManager.dummySession.player
-                                : DummyManager.mainSession.player
-                )
-        );
+        ClientPlayerEntity player = (ClientPlayerEntity) (Object) this;
+        if (player == DummyManager.dummySession.player || player == DummyManager.mainSession.player) {
+            cir.setReturnValue(true);
+        }
     }
 }
