@@ -82,6 +82,19 @@ public class ClientPlayNetworkHandlerMixin {
         }
     }
 
+    @Inject(method = "onGameJoin", at = @At("TAIL"))
+    private void onGameJoinTail(GameJoinS2CPacket packet, CallbackInfo ci) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) return;
+        ClientPlayNetworkHandler handler = (ClientPlayNetworkHandler) (Object) this;
+        if (!DummyManager.isDummyConnection(handler.getConnection()) && !DummyManager.isControllingDummy()) {
+            DummyManager.mainSession.player = client.player;
+            DummyManager.mainSession.world = client.world;
+            DummyManager.mainSession.interactionManager = client.interactionManager;
+            DummyManager.mainSession.networkHandler = handler;
+        }
+    }
+
     @Inject(method = "onPlayerRespawn", at = @At("HEAD"), cancellable = true)
     private void onPlayerRespawnHead(PlayerRespawnS2CPacket packet, CallbackInfo ci) {
         MinecraftClient client = MinecraftClient.getInstance();
@@ -97,6 +110,19 @@ public class ClientPlayNetworkHandlerMixin {
         } else if (DummyManager.mainSession.networkHandler == handler && DummyManager.isControllingDummy()) {
             DummyManager.onMainPlayerRespawn(handler, packet);
             ci.cancel();
+        }
+    }
+
+    @Inject(method = "onPlayerRespawn", at = @At("TAIL"))
+    private void onPlayerRespawnTail(PlayerRespawnS2CPacket packet, CallbackInfo ci) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) return;
+        ClientPlayNetworkHandler handler = (ClientPlayNetworkHandler) (Object) this;
+        if (!DummyManager.isDummyConnection(handler.getConnection()) && !DummyManager.isControllingDummy()) {
+            DummyManager.mainSession.player = client.player;
+            DummyManager.mainSession.world = client.world;
+            DummyManager.mainSession.interactionManager = client.interactionManager;
+            DummyManager.mainSession.networkHandler = handler;
         }
     }
 
