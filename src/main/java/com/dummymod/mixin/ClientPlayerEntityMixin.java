@@ -9,11 +9,24 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(ClientPlayerEntity.class)
 public class ClientPlayerEntityMixin {
-    @Inject(method = "isCamera", at = @At("HEAD"), cancellable = true)
-    private void dummymod$treatSessionPlayersAsLocal(CallbackInfoReturnable<Boolean> cir) {
-        ClientPlayerEntity player = (ClientPlayerEntity) (Object) this;
-        if (player == DummyManager.dummySession.player || player == DummyManager.mainSession.player) {
-            cir.setReturnValue(true);
-        }
+
+    @Inject(
+            method = "isCamera",
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private void dummymod$treatSessionPlayersAsLocal(
+            CallbackInfoReturnable<Boolean> cir
+    ) {
+        ClientPlayerEntity player =
+                (ClientPlayerEntity) (Object) this;
+
+        cir.setReturnValue(
+                player == (
+                        DummyManager.isControllingDummy()
+                                ? DummyManager.dummySession.player
+                                : DummyManager.mainSession.player
+                )
+        );
     }
 }

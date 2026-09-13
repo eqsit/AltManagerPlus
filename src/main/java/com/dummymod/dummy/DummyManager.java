@@ -9,9 +9,9 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import io.netty.channel.ChannelFuture;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.hud.ChatHud;
 import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.client.gui.screen.world.LevelLoadingScreen;
-import net.minecraft.client.gui.hud.ChatHud;
 import net.minecraft.client.input.Input;
 import net.minecraft.client.input.KeyboardInput;
 import net.minecraft.client.network.*;
@@ -49,17 +49,22 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class DummyManager {
     private static final Logger LOGGER = LoggerFactory.getLogger("DummyMod-Manager");
+
     public static final PlayerSession mainSession = new PlayerSession("Main");
     public static final PlayerSession dummySession = new PlayerSession("Dummy");
 
     private static volatile boolean controllingDummy = false;
     private static volatile boolean connecting = false;
     private static volatile boolean disconnecting = false;
-    private static volatile boolean reconfiguring = false;
     private static volatile boolean resumeDummyControlAfterReconfiguration = false;
+    private static volatile boolean reconfiguring = false;
+
+    public static volatile ClientConnection dummyActiveConnection;
     private static volatile ClientConnection dummyPendingConnection;
+
     private static final AtomicLong connectionAttemptCounter = new AtomicLong();
     private static volatile long activeConnectionAttempt;
+
     private static final Map<Identifier, byte[]> serverCookies = new ConcurrentHashMap<>();
     private static final Set<ClientConnection> expectedDisconnects = ConcurrentHashMap.newKeySet();
 
@@ -74,12 +79,12 @@ public class DummyManager {
         return connecting;
     }
 
-    public static boolean isDummyReconfiguring() {
-        return reconfiguring;
-    }
-
     public static boolean isControllingDummy() {
         return isConnected() && controllingDummy;
+    }
+
+    public static boolean isDummyReconfiguring() {
+        return reconfiguring;
     }
 
     public static Map<Identifier, byte[]> getCookies() {
@@ -99,43 +104,60 @@ public class DummyManager {
     }
 
     public static boolean isDummyConnection(ClientConnection connection) {
-        if (connection == null) return false;
-        if (connection == dummyPendingConnection || expectedDisconnects.contains(connection)) return true;
-        return dummySession.networkHandler != null
-                && dummySession.networkHandler.getConnection() == connection;
+        return connection != null
+                && (connection == dummyActiveConnection
+                || connection == dummyPendingConnection
+                || expectedDisconnects.contains(connection));
     }
 
-    public static void registerPlayHandler(ClientConnection connection, ClientPlayNetworkHandler handler) {
-        if (!isDummyConnection(connection)) return;
+    public static void registerPlayHandler(
+            ClientConnection connection,
+            ClientPlayNetworkHandler handler
+    ) {
+        if (!isDummyConnection(connection)) {
+            return;
+        }
+
+        dummyActiveConnection = connection;
         dummyPendingConnection = connection;
+
         dummySession.networkHandler = handler;
         dummySession.name = handler.getProfile().name();
-        LOGGER.debug("[DummyMod-Manager] Registered dummy play handler for '{}'", dummySession.name);
     }
 
     public static void beginDummyReconfiguration(ClientConnection connection) {
-        if (!isDummyConnection(connection)) return;
+        if (!isDummyConnection(connection)) {
+            return;
+        }
 
         reconfiguring = true;
+        dummyActiveConnection = connection;
+
         boolean wasControllingDummy = controllingDummy;
+
         if (wasControllingDummy) {
             setControllingDummy(false);
         }
+
         resumeDummyControlAfterReconfiguration = wasControllingDummy;
         connecting = true;
+
         dummySession.clearWorld();
-        LOGGER.info("[DummyMod-Manager] Dummy entered server reconfiguration (resumeControl={})",
-                resumeDummyControlAfterReconfiguration);
     }
 
     public static void onConnectionClosed(ClientConnection connection) {
         MinecraftClient client = MinecraftClient.getInstance();
+
         Runnable handle = () -> {
-            if (!isDummyConnection(connection)) return;
+            if (!isDummyConnection(connection)) {
+                return;
+            }
+
             if (!consumeExpectedDisconnect(connection)) {
                 disconnect();
             }
         };
+
         if (client != null && !client.isOnThread()) {
             client.execute(handle);
         } else {
@@ -145,8 +167,13 @@ public class DummyManager {
 
     public static void restoreMainResourcePackConnection() {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (mainSession.networkHandler == null) return;
+
+        if (mainSession.networkHandler == null) {
+            return;
+        }
+
         ClientConnection mainConnection = mainSession.networkHandler.getConnection();
+
         if (mainConnection != null && mainConnection.isOpen()) {
             client.getServerResourcePackProvider().init(
                     mainConnection,
@@ -157,149 +184,152 @@ public class DummyManager {
 
     public static void setControllingDummy(boolean dummy) {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null) return;
+
+        if (client == null || client.player == null || client.world == null) {
+            return;
+        }
 
         if (dummy) {
             if (!dummySession.isValid()) {
-                LOGGER.warn("[DummyMod-Manager] Cannot switch to dummy: dummy session is not valid");
                 if (client.player != null) {
-                    client.player.sendMessage(Text.literal("§c[DummyMod] Дамми еще загружается или не подключен!"), true);
+                    client.player.sendMessage(
+                            Text.literal("§c[DummyMod] Дамми еще загружается или не подключен!"),
+                            true
+                    );
                 }
+
                 return;
             }
 
-            // Save active main session when the live client context is usable. If a
-            // renderer/mod transition has already nulled a live field, retain the
-            // previously captured main session rather than overwriting it.
             saveVisibleChat(mainSession, client);
-            if (client.player != null && client.world != null) {
-                mainSession.player = client.player;
-                mainSession.world = client.world;
-                mainSession.interactionManager = client.interactionManager;
-                mainSession.networkHandler = client.getNetworkHandler();
-                if (client.getSession() != null) {
-                    mainSession.name = client.getSession().getUsername();
-                }
+
+            mainSession.player = client.player;
+            mainSession.world = client.world;
+            mainSession.interactionManager = client.interactionManager;
+            mainSession.networkHandler = client.getNetworkHandler();
+
+            if (client.getSession() != null) {
+                mainSession.name = client.getSession().getUsername();
             }
 
-            if (mainSession.player == null || mainSession.world == null) {
-                LOGGER.warn("[DummyMod-Manager] Cannot switch to dummy: main session is not available");
-                return;
-            }
-
-            // Put main player in idle input state
             if (mainSession.player != null) {
                 mainSession.player.input = new Input();
             }
 
-            // If dummy was dead, request respawn
             if (dummySession.player != null && dummySession.player.isDead()) {
                 dummySession.player.requestRespawn();
             }
 
-            // Switch to dummy session
             controllingDummy = true;
+
             client.player = dummySession.player;
+            client.world = dummySession.world;
             client.interactionManager = dummySession.interactionManager;
 
-            // Give dummy active keyboard input
             dummySession.player.input = new KeyboardInput(client.options);
 
-            // Use MinecraftClient#setWorld so WorldRenderer, ParticleManager and
-            // GameRenderer all switch to the same non-null world atomically.
-            syncClientWorld(client, dummySession.world, false);
+            client.worldRenderer.setWorld(dummySession.world);
             client.setCameraEntity(dummySession.player);
+
             restoreVisibleChat(dummySession, client);
 
-            if (client.currentScreen instanceof DeathScreen || client.currentScreen instanceof LevelLoadingScreen) {
+            if (client.currentScreen instanceof DeathScreen
+                    || client.currentScreen instanceof LevelLoadingScreen) {
                 client.setScreen(null);
             }
 
             KeyBinding.unpressAll();
-            client.mouse.lockCursor();
 
-            LOGGER.info("[DummyMod-Manager] Switched active game context to DUMMY ('{}')", dummySession.name);
-            client.player.sendMessage(
-                    Text.literal(String.format("§6[DummyMod] §fУправление: §aДАММИ §7(%s)", dummySession.name)),
-                    true
-            );
-            client.player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 0.8f, 1.2f);
+            if (client.mouse != null) {
+                client.mouse.lockCursor();
+            }
         } else {
             if (mainSession.player == null || mainSession.world == null) {
                 return;
             }
 
-            // Put dummy player in idle input state
             saveVisibleChat(dummySession, client);
+
             if (dummySession.player != null) {
                 dummySession.player.input = new Input();
             }
 
-            // If main was dead, request respawn
             if (mainSession.player.isDead()) {
                 mainSession.player.requestRespawn();
             }
 
-            // Switch to main session
             controllingDummy = false;
+
             client.player = mainSession.player;
+            client.world = mainSession.world;
             client.interactionManager = mainSession.interactionManager;
 
-            // Give main active keyboard input
             mainSession.player.input = new KeyboardInput(client.options);
 
-            // Use MinecraftClient#setWorld so WorldRenderer, ParticleManager and
-            // GameRenderer all switch to the same non-null world atomically.
-            syncClientWorld(client, mainSession.world, false);
+            client.worldRenderer.setWorld(mainSession.world);
             client.setCameraEntity(mainSession.player);
+
             restoreVisibleChat(mainSession, client);
 
-            if (client.currentScreen instanceof DeathScreen || client.currentScreen instanceof LevelLoadingScreen) {
+            if (client.currentScreen instanceof DeathScreen
+                    || client.currentScreen instanceof LevelLoadingScreen) {
                 client.setScreen(null);
             }
 
             KeyBinding.unpressAll();
-            client.mouse.lockCursor();
 
-            LOGGER.info("[DummyMod-Manager] Switched active game context to MAIN ('{}')", mainSession.name);
-            client.player.sendMessage(
-                    Text.literal(String.format("§6[DummyMod] §fУправление: §bОСНОВА §7(%s)", mainSession.name)),
-                    true
-            );
-            client.player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 0.8f, 0.8f);
+            if (client.mouse != null) {
+                client.mouse.lockCursor();
+            }
         }
     }
 
     public static void toggleControl() {
         if (!isConnected()) {
-            LOGGER.warn("[DummyMod-Manager] Cannot toggle control: Dummy is not connected!");
             MinecraftClient client = MinecraftClient.getInstance();
+
             if (client != null && client.player != null) {
-                client.player.sendMessage(Text.literal("§c[DummyMod] Дамми не подключен!"), true);
+                client.player.sendMessage(
+                        Text.literal("§c[DummyMod] Дамми не подключен!"),
+                        true
+                );
             }
+
             return;
         }
+
         setControllingDummy(!controllingDummy);
     }
 
     public static void beforePacketApply(PacketListener listener) {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null) return;
+
+        if (client == null) {
+            return;
+        }
 
         if (listener == dummySession.networkHandler) {
-            if (!controllingDummy && dummySession.player != null && dummySession.world != null) {
+            if (!controllingDummy
+                    && dummySession.player != null
+                    && dummySession.world != null) {
                 activePacketSession = dummySession;
+
                 saveVisibleChat(mainSession, client);
                 restoreVisibleChat(dummySession, client);
+
                 client.player = dummySession.player;
                 client.world = dummySession.world;
                 client.interactionManager = dummySession.interactionManager;
             }
         } else if (listener == mainSession.networkHandler) {
-            if (controllingDummy && mainSession.player != null && mainSession.world != null) {
+            if (controllingDummy
+                    && mainSession.player != null
+                    && mainSession.world != null) {
                 activePacketSession = mainSession;
+
                 saveVisibleChat(dummySession, client);
                 restoreVisibleChat(mainSession, client);
+
                 client.player = mainSession.player;
                 client.world = mainSession.world;
                 client.interactionManager = mainSession.interactionManager;
@@ -308,19 +338,28 @@ public class DummyManager {
     }
 
     public static void afterPacketApply(PacketListener listener) {
-        if (activePacketSession == null) return;
+        if (activePacketSession == null) {
+            return;
+        }
+
         PlayerSession background = activePacketSession;
         activePacketSession = null;
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null) return;
 
-        PlayerSession fg = controllingDummy ? dummySession : mainSession;
+        MinecraftClient client = MinecraftClient.getInstance();
+
+        if (client == null) {
+            return;
+        }
+
+        PlayerSession foreground = controllingDummy ? dummySession : mainSession;
+
         saveVisibleChat(background, client);
-        restoreVisibleChat(fg, client);
-        if (fg.player != null && fg.world != null) {
-            client.player = fg.player;
-            client.world = fg.world;
-            client.interactionManager = fg.interactionManager;
+        restoreVisibleChat(foreground, client);
+
+        if (foreground.player != null && foreground.world != null) {
+            client.player = foreground.player;
+            client.world = foreground.world;
+            client.interactionManager = foreground.interactionManager;
         }
     }
 
@@ -336,41 +375,49 @@ public class DummyManager {
         }
     }
 
-    private static void syncClientWorld(MinecraftClient client, ClientWorld world, boolean stopSounds) {
-        if (client == null || world == null) {
-            LOGGER.warn("[DummyMod-Manager] Refusing to synchronize a null client world");
+    private static void syncClientWorld(
+            MinecraftClient client,
+            ClientWorld world,
+            boolean stopSounds
+    ) {
+        client.world = world;
+        ((MinecraftClientAccessor) client).dummymod$setWorld(world, stopSounds);
+    }
+
+    public static void onDummyGameJoin(
+            ClientPlayNetworkHandler handler,
+            GameJoinS2CPacket packet
+    ) {
+        MinecraftClient client = MinecraftClient.getInstance();
+
+        if (client == null) {
             return;
         }
 
-        // Do not call WorldRenderer#setWorld directly here. MinecraftClient#setWorld
-        // is the authoritative transition point and keeps WorldRenderer,
-        // ParticleManager and GameRenderer synchronized with MinecraftClient.world.
-        ((MinecraftClientAccessor) client).dummymod$setWorld(world, stopSounds);
-
-        // Keep the public field explicit as a defensive invariant for modded clients
-        // whose injected setWorld path may be altered by renderer mods.
-        client.world = world;
-    }
-
-    public static void onDummyGameJoin(ClientPlayNetworkHandler handler, GameJoinS2CPacket packet) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null) return;
-        connecting = false;
+        dummyActiveConnection = handler.getConnection();
 
         CommonPlayerSpawnInfo spawnInfo = packet.commonPlayerSpawnInfo();
-        List<RegistryKey<World>> dimensionList = Lists.newArrayList(packet.dimensionIds());
-        Set<RegistryKey<World>> worldKeys = Sets.newLinkedHashSet(dimensionList);
 
-        ClientPlayNetworkHandlerAccessor accessor = (ClientPlayNetworkHandlerAccessor) handler;
+        List<RegistryKey<World>> dimensionList =
+                Lists.newArrayList(packet.dimensionIds());
+
+        Set<RegistryKey<World>> worldKeys =
+                Sets.newLinkedHashSet(dimensionList);
+
+        ClientPlayNetworkHandlerAccessor accessor =
+                (ClientPlayNetworkHandlerAccessor) handler;
+
         accessor.setWorldKeys(worldKeys);
         accessor.setChunkLoadDistance(packet.viewDistance());
         accessor.setSimulationDistance(packet.simulationDistance());
 
-        ClientWorld.Properties properties = new ClientWorld.Properties(
-                Difficulty.NORMAL,
-                packet.hardcore(),
-                spawnInfo.isFlat()
-        );
+        ClientWorld.Properties properties =
+                new ClientWorld.Properties(
+                        Difficulty.NORMAL,
+                        packet.hardcore(),
+                        spawnInfo.isFlat()
+                );
+
         accessor.setWorldProperties(properties);
 
         ClientWorld dummyWorld = new ClientWorld(
@@ -388,66 +435,67 @@ public class DummyManager {
 
         accessor.setWorld(dummyWorld);
 
-        ClientPlayerInteractionManager interactionManager = new ClientPlayerInteractionManager(client, handler);
-        ClientPlayerEntity dummyPlayer = interactionManager.createPlayer(
-                dummyWorld,
-                new StatHandler(),
-                new ClientRecipeBook()
-        );
+        ClientPlayerInteractionManager interactionManager =
+                new ClientPlayerInteractionManager(client, handler);
+
+        ClientPlayerEntity dummyPlayer =
+                interactionManager.createPlayer(
+                        dummyWorld,
+                        new StatHandler(),
+                        new ClientRecipeBook()
+                );
+
         dummyPlayer.setId(packet.playerEntityId());
         dummyPlayer.init();
-        dummyPlayer.input = new Input(); // Idle input
+        dummyPlayer.input = new Input();
+
         dummyWorld.addEntity(dummyPlayer);
+
         interactionManager.copyAbilities(dummyPlayer);
+
         dummyPlayer.setReducedDebugInfo(packet.reducedDebugInfo());
         dummyPlayer.setShowsDeathScreen(packet.showDeathScreen());
         dummyPlayer.setLimitedCraftingEnabled(packet.doLimitedCrafting());
         dummyPlayer.setLastDeathPos(spawnInfo.lastDeathLocation());
         dummyPlayer.setPortalCooldown(spawnInfo.portalCooldown());
-        interactionManager.setGameModes(spawnInfo.gameMode(), spawnInfo.lastGameMode());
+
+        interactionManager.setGameModes(
+                spawnInfo.gameMode(),
+                spawnInfo.lastGameMode()
+        );
 
         dummySession.player = dummyPlayer;
         dummySession.world = dummyWorld;
         dummySession.interactionManager = interactionManager;
         dummySession.networkHandler = handler;
         dummySession.name = handler.getProfile().name();
-        reconfiguring = false;
 
-        // Tell the server the player finished loading chunks and can move/spawn
         accessor.setLoaded(true);
-        if (handler.getConnection() != null && handler.getConnection().isOpen()) {
+
+        if (handler.getConnection() != null
+                && handler.getConnection().isOpen()) {
             handler.getConnection().send(new PlayerLoadedC2SPacket());
         }
+
         accessor.setSecureChatEnforced(packet.enforcesSecureChat());
+
+        connecting = false;
+        reconfiguring = false;
 
         if (controllingDummy) {
             dummyPlayer.input = new KeyboardInput(client.options);
+
             client.player = dummyPlayer;
+            client.world = dummyWorld;
             client.interactionManager = interactionManager;
+
             syncClientWorld(client, dummyWorld, true);
             client.setCameraEntity(dummyPlayer);
-            if (client.currentScreen instanceof DeathScreen || client.currentScreen instanceof LevelLoadingScreen) {
+
+            if (client.currentScreen instanceof DeathScreen
+                    || client.currentScreen instanceof LevelLoadingScreen) {
                 client.setScreen(null);
             }
-        }
-
-        LOGGER.info(
-                "[DummyMod-Manager] Dummy joined successfully as '{}' (entityId={}) on thread {}",
-                dummySession.name,
-                dummyPlayer.getId(),
-                Thread.currentThread().getName()
-        );
-
-        if (client.player != null) {
-            client.player.sendMessage(
-                    Text.literal(String.format(
-                            "§a[DummyMod] Дамми '%s' успешно подключен! Переключение: §e[%s]",
-                            dummySession.name,
-                            DummyMod.SWITCH_KEY.getBoundKeyLocalizedText().getString()
-                    )),
-                    false
-            );
-            client.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.8f, 1.2f);
         }
 
         if (resumeDummyControlAfterReconfiguration) {
@@ -461,33 +509,42 @@ public class DummyManager {
             PlayerRespawnS2CPacket packet
     ) {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null) return;
+
+        if (client == null) {
+            return;
+        }
 
         CommonPlayerSpawnInfo spawnInfo = packet.commonPlayerSpawnInfo();
         RegistryKey<World> newDimension = spawnInfo.dimension();
+
         ClientPlayerEntity oldPlayer = dummySession.player;
         ClientWorld oldWorld = dummySession.world;
 
         boolean dimensionChanged =
-                oldWorld == null || !oldWorld.getRegistryKey().equals(newDimension);
+                oldWorld == null
+                        || !oldWorld.getRegistryKey().equals(newDimension);
+
         ClientWorld newWorld;
 
         ClientPlayNetworkHandlerAccessor accessor =
                 (ClientPlayNetworkHandlerAccessor) handler;
 
         if (dimensionChanged) {
-            Difficulty difficulty = oldWorld != null
-                    ? oldWorld.getLevelProperties().getDifficulty()
-                    : Difficulty.NORMAL;
+            Difficulty difficulty =
+                    oldWorld != null
+                            ? oldWorld.getLevelProperties().getDifficulty()
+                            : Difficulty.NORMAL;
 
             boolean isHardcore =
-                    oldWorld != null && oldWorld.getLevelProperties().isHardcore();
+                    oldWorld != null
+                            && oldWorld.getLevelProperties().isHardcore();
 
-            ClientWorld.Properties properties = new ClientWorld.Properties(
-                    difficulty,
-                    isHardcore,
-                    spawnInfo.isFlat()
-            );
+            ClientWorld.Properties properties =
+                    new ClientWorld.Properties(
+                            difficulty,
+                            isHardcore,
+                            spawnInfo.isFlat()
+                    );
 
             accessor.setWorldProperties(properties);
 
@@ -516,14 +573,18 @@ public class DummyManager {
                         : new ClientPlayerInteractionManager(client, handler);
 
         StatHandler statHandler =
-                oldPlayer != null ? oldPlayer.getStatHandler() : new StatHandler();
+                oldPlayer != null
+                        ? oldPlayer.getStatHandler()
+                        : new StatHandler();
 
         ClientRecipeBook recipeBook =
-                oldPlayer != null ? oldPlayer.getRecipeBook() : new ClientRecipeBook();
+                oldPlayer != null
+                        ? oldPlayer.getRecipeBook()
+                        : new ClientRecipeBook();
 
         ClientPlayerEntity newPlayer =
                 oldPlayer != null
-                                && packet.hasFlag(PlayerRespawnS2CPacket.KEEP_TRACKED_DATA)
+                        && packet.hasFlag(PlayerRespawnS2CPacket.KEEP_TRACKED_DATA)
                         ? interactionManager.createPlayer(
                                 newWorld,
                                 statHandler,
@@ -556,6 +617,7 @@ public class DummyManager {
 
         newPlayer.setLastDeathPos(spawnInfo.lastDeathLocation());
         newPlayer.setPortalCooldown(spawnInfo.portalCooldown());
+
         newWorld.addEntity(newPlayer);
 
         interactionManager.copyAbilities(newPlayer);
@@ -565,7 +627,9 @@ public class DummyManager {
         );
 
         accessor.setLoaded(true);
-        if (handler.getConnection() != null && handler.getConnection().isOpen()) {
+
+        if (handler.getConnection() != null
+                && handler.getConnection().isOpen()) {
             handler.getConnection().send(new PlayerLoadedC2SPacket());
         }
 
@@ -576,6 +640,7 @@ public class DummyManager {
             newPlayer.input = new KeyboardInput(client.options);
 
             client.player = newPlayer;
+            client.world = newWorld;
             client.interactionManager = interactionManager;
 
             syncClientWorld(client, newWorld, dimensionChanged);
@@ -587,16 +652,13 @@ public class DummyManager {
             }
 
             KeyBinding.unpressAll();
-            client.mouse.lockCursor();
-        } else {
-            newPlayer.input = new Input(); // Idle input
-        }
 
-        LOGGER.info(
-                "[DummyMod-Manager] Dummy player respawned/changed dimension to {} (dimensionChanged={})",
-                newDimension.getValue(),
-                dimensionChanged
-        );
+            if (client.mouse != null) {
+                client.mouse.lockCursor();
+            }
+        } else {
+            newPlayer.input = new Input();
+        }
     }
 
     public static void onMainPlayerRespawn(
@@ -604,37 +666,49 @@ public class DummyManager {
             PlayerRespawnS2CPacket packet
     ) {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null) return;
+
+        if (client == null) {
+            return;
+        }
 
         CommonPlayerSpawnInfo spawnInfo = packet.commonPlayerSpawnInfo();
         RegistryKey<World> newDimension = spawnInfo.dimension();
 
         ClientPlayerEntity oldPlayer =
-                mainSession.player != null ? mainSession.player : client.player;
+                mainSession.player != null
+                        ? mainSession.player
+                        : client.player;
 
         ClientWorld oldWorld =
-                mainSession.world != null ? mainSession.world : client.world;
+                mainSession.world != null
+                        ? mainSession.world
+                        : client.world;
 
         boolean dimensionChanged =
-                oldWorld == null || !oldWorld.getRegistryKey().equals(newDimension);
+                oldWorld == null
+                        || !oldWorld.getRegistryKey().equals(newDimension);
+
         ClientWorld newWorld;
 
         ClientPlayNetworkHandlerAccessor accessor =
                 (ClientPlayNetworkHandlerAccessor) handler;
 
         if (dimensionChanged) {
-            Difficulty difficulty = oldWorld != null
-                    ? oldWorld.getLevelProperties().getDifficulty()
-                    : Difficulty.NORMAL;
+            Difficulty difficulty =
+                    oldWorld != null
+                            ? oldWorld.getLevelProperties().getDifficulty()
+                            : Difficulty.NORMAL;
 
             boolean isHardcore =
-                    oldWorld != null && oldWorld.getLevelProperties().isHardcore();
+                    oldWorld != null
+                            && oldWorld.getLevelProperties().isHardcore();
 
-            ClientWorld.Properties properties = new ClientWorld.Properties(
-                    difficulty,
-                    isHardcore,
-                    spawnInfo.isFlat()
-            );
+            ClientWorld.Properties properties =
+                    new ClientWorld.Properties(
+                            difficulty,
+                            isHardcore,
+                            spawnInfo.isFlat()
+                    );
 
             accessor.setWorldProperties(properties);
 
@@ -663,14 +737,18 @@ public class DummyManager {
                         : new ClientPlayerInteractionManager(client, handler);
 
         StatHandler statHandler =
-                oldPlayer != null ? oldPlayer.getStatHandler() : new StatHandler();
+                oldPlayer != null
+                        ? oldPlayer.getStatHandler()
+                        : new StatHandler();
 
         ClientRecipeBook recipeBook =
-                oldPlayer != null ? oldPlayer.getRecipeBook() : new ClientRecipeBook();
+                oldPlayer != null
+                        ? oldPlayer.getRecipeBook()
+                        : new ClientRecipeBook();
 
         ClientPlayerEntity newPlayer =
                 oldPlayer != null
-                                && packet.hasFlag(PlayerRespawnS2CPacket.KEEP_TRACKED_DATA)
+                        && packet.hasFlag(PlayerRespawnS2CPacket.KEEP_TRACKED_DATA)
                         ? interactionManager.createPlayer(
                                 newWorld,
                                 statHandler,
@@ -713,7 +791,9 @@ public class DummyManager {
         );
 
         accessor.setLoaded(true);
-        if (handler.getConnection() != null && handler.getConnection().isOpen()) {
+
+        if (handler.getConnection() != null
+                && handler.getConnection().isOpen()) {
             handler.getConnection().send(new PlayerLoadedC2SPacket());
         }
 
@@ -725,6 +805,7 @@ public class DummyManager {
             newPlayer.input = new KeyboardInput(client.options);
 
             client.player = newPlayer;
+            client.world = newWorld;
             client.interactionManager = interactionManager;
 
             syncClientWorld(client, newWorld, dimensionChanged);
@@ -736,43 +817,30 @@ public class DummyManager {
             }
 
             KeyBinding.unpressAll();
-            client.mouse.lockCursor();
-        } else {
-            newPlayer.input = new Input(); // Idle input
-        }
 
-        LOGGER.info(
-                "[DummyMod-Manager] Main player respawned/changed dimension to {} (dimensionChanged={})",
-                newDimension.getValue(),
-                dimensionChanged
-        );
+            if (client.mouse != null) {
+                client.mouse.lockCursor();
+            }
+        } else {
+            newPlayer.input = new Input();
+        }
     }
 
     public static void connectCurrentServer(String nick) {
         MinecraftClient client = MinecraftClient.getInstance();
 
         if (connecting || isConnected()) {
-            if (client.player != null) {
-                client.player.sendMessage(
-                        Text.literal("§e[DummyMod] Дамми уже подключается или подключен."),
-                        true
-                );
-            }
             return;
         }
 
-        if (client.world == null || client.player == null) {
-            if (client.player != null) {
-                client.player.sendMessage(
-                        Text.literal("§c[DummyMod] Вы должны быть в игре на сервере!"),
-                        false
-                );
-            }
+        if (client.world == null
+                || client.player == null
+                || client.isInSingleplayer()) {
             return;
         }
 
-        // Save current main session
         saveVisibleChat(mainSession, client);
+
         mainSession.player = client.player;
         mainSession.world = client.world;
         mainSession.interactionManager = client.interactionManager;
@@ -790,35 +858,29 @@ public class DummyManager {
         if (serverInfo != null
                 && serverInfo.address != null
                 && !serverInfo.address.isEmpty()) {
-            LOGGER.info(
-                    "[DummyMod-Manager] Resolving server from ServerInfo: {}",
-                    serverInfo.address
-            );
-
-            ServerAddress serverAddress =
-                    ServerAddress.parse(serverInfo.address);
+            ServerAddress serverAddress = ServerAddress.parse(serverInfo.address);
 
             hostName = serverAddress.getAddress();
 
             Optional<Address> resolved =
                     AllowedAddressResolver.DEFAULT.resolve(serverAddress);
 
-            if (resolved.isPresent()) {
-                targetSocketAddress =
-                        resolved.get().getInetSocketAddress();
-            } else {
-                targetSocketAddress = new InetSocketAddress(
-                        serverAddress.getAddress(),
-                        serverAddress.getPort()
-                );
-            }
+            targetSocketAddress =
+                    resolved.map(Address::getInetSocketAddress)
+                            .orElseGet(
+                                    () -> new InetSocketAddress(
+                                            serverAddress.getAddress(),
+                                            serverAddress.getPort()
+                                    )
+                            );
         }
 
         if (targetSocketAddress == null
-                && client.getNetworkHandler() != null
-                && client.getNetworkHandler().getConnection() != null) {
+                && client.getNetworkHandler() != null) {
             SocketAddress socketAddress =
-                    client.getNetworkHandler().getConnection().getAddress();
+                    client.getNetworkHandler()
+                            .getConnection()
+                            .getAddress();
 
             if (socketAddress instanceof InetSocketAddress inet) {
                 targetSocketAddress = inet;
@@ -826,36 +888,19 @@ public class DummyManager {
             }
         }
 
-        if (targetSocketAddress == null || client.isInSingleplayer()) {
-            if (client.player != null) {
-                client.player.sendMessage(
-                        Text.literal(
-                                "§c[DummyMod] Дамми работает только на мультиплеер-серверах!"
-                        ),
-                        false
-                );
-            }
+        if (targetSocketAddress == null) {
             return;
         }
 
-        // Fix 0.0.0.0 local bind address
-        if (targetSocketAddress.getAddress() != null
-                && targetSocketAddress.getAddress().isAnyLocalAddress()) {
+        if ((targetSocketAddress.getAddress() != null
+                && targetSocketAddress.getAddress().isAnyLocalAddress())
+                || "0.0.0.0".equals(targetSocketAddress.getHostString())) {
             targetSocketAddress =
                     new InetSocketAddress(
                             "127.0.0.1",
                             targetSocketAddress.getPort()
                     );
 
-            if ("0.0.0.0".equals(hostName) || hostName == null) {
-                hostName = "127.0.0.1";
-            }
-        } else if ("0.0.0.0".equals(targetSocketAddress.getHostString())) {
-            targetSocketAddress =
-                    new InetSocketAddress(
-                            "127.0.0.1",
-                            targetSocketAddress.getPort()
-                    );
             hostName = "127.0.0.1";
         }
 
@@ -866,123 +911,99 @@ public class DummyManager {
         DummyConfig.getInstance().save();
 
         long attempt = connectionAttemptCounter.incrementAndGet();
+
         activeConnectionAttempt = attempt;
         connecting = true;
 
         final InetSocketAddress finalTarget = targetSocketAddress;
         final String finalHost = hostName;
 
-        Thread connectThread = new Thread(() -> {
-            try {
-                LOGGER.info(
-                        "[DummyMod-Manager] Connecting dummy '{}' to {}:{}...",
-                        nick,
-                        finalHost,
-                        finalTarget.getPort()
-                );
+        Thread connectThread = new Thread(
+                () -> {
+                    try {
+                        if (!isAttemptCurrent(attempt)) {
+                            return;
+                        }
 
-                if (!isAttemptCurrent(attempt)) return;
+                        ClientConnection connection =
+                                new ClientConnection(NetworkSide.CLIENTBOUND);
 
-                ClientConnection connection =
-                        new ClientConnection(NetworkSide.CLIENTBOUND);
+                        dummyPendingConnection = connection;
+                        dummyActiveConnection = connection;
 
-                if (!isAttemptCurrent(attempt)) return;
+                        NetworkingBackend backend =
+                                NetworkingBackend.remote(
+                                        MinecraftClient.getInstance()
+                                                .options
+                                                .shouldUseNativeTransport()
+                                );
 
-                dummyPendingConnection = connection;
+                        ChannelFuture future =
+                                ClientConnection.connect(
+                                        finalTarget,
+                                        backend,
+                                        connection
+                                );
 
-                boolean nativeTransport =
-                        MinecraftClient.getInstance()
-                                .options
-                                .shouldUseNativeTransport();
+                        if (!future.awaitUninterruptibly(15, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("Connection timeout");
+                        }
 
-                NetworkingBackend backend =
-                        NetworkingBackend.remote(nativeTransport);
+                        if (!future.isSuccess()) {
+                            throw new IllegalStateException(
+                                    "Failed to open connection",
+                                    future.cause()
+                            );
+                        }
 
-                ChannelFuture future =
-                        ClientConnection.connect(
-                                finalTarget,
-                                backend,
-                                connection
-                        );
+                        if (!isAttemptCurrent(attempt)) {
+                            closeExpected(connection, "Dummy connection cancelled");
+                            return;
+                        }
 
-                if (!future.awaitUninterruptibly(15, TimeUnit.SECONDS)) {
-                    throw new IllegalStateException(
-                            "Превышено время ожидания подключения (15 секунд)"
-                    );
-                }
+                        UUID uuid =
+                                UUID.nameUUIDFromBytes(
+                                        ("OfflinePlayer:" + nick)
+                                                .getBytes(StandardCharsets.UTF_8)
+                                );
 
-                if (!future.isSuccess()) {
-                    throw new IllegalStateException(
-                            "Не удалось открыть соединение",
-                            future.cause()
-                    );
-                }
+                        DummyLoginHandler loginHandler =
+                                new DummyLoginHandler(null, connection);
 
-                if (!isAttemptCurrent(attempt)) {
-                    connection.disconnect(
-                            Text.literal("Dummy connection cancelled")
-                    );
-                    return;
-                }
-
-                UUID uuid = UUID.nameUUIDFromBytes(
-                        ("OfflinePlayer:" + nick)
-                                .getBytes(StandardCharsets.UTF_8)
-                );
-
-                DummyLoginHandler loginHandler =
-                        new DummyLoginHandler(null, connection);
-
-                connection.connect(
-                        finalHost,
-                        finalTarget.getPort(),
-                        LoginStates.C2S,
-                        LoginStates.S2C,
-                        loginHandler,
-                        false
-                );
-
-                connection.send(
-                        new LoginHelloC2SPacket(nick, uuid)
-                );
-
-                MinecraftClient.getInstance().execute(() -> {
-                    if (MinecraftClient.getInstance().player != null) {
-                        MinecraftClient.getInstance().player.sendMessage(
-                                Text.literal(String.format(
-                                        "§a[DummyMod] Дамми '%s' подключается к %s:%d...",
-                                        nick,
-                                        finalHost,
-                                        finalTarget.getPort()
-                                )),
+                        connection.connect(
+                                finalHost,
+                                finalTarget.getPort(),
+                                LoginStates.C2S,
+                                LoginStates.S2C,
+                                loginHandler,
                                 false
                         );
-                    }
-                });
-            } catch (Exception e) {
-                LOGGER.error(
-                        "[DummyMod-Manager] Connection exception",
-                        e
-                );
 
-                MinecraftClient.getInstance().execute(() -> {
-                    if (!isAttemptCurrent(attempt)) return;
-
-                    connecting = false;
-                    dummyPendingConnection = null;
-
-                    if (MinecraftClient.getInstance().player != null) {
-                        MinecraftClient.getInstance().player.sendMessage(
-                                Text.literal(
-                                        "§c[DummyMod] Ошибка подключения: "
-                                                + e.getMessage()
-                                ),
-                                false
+                        connection.send(
+                                new LoginHelloC2SPacket(nick, uuid)
                         );
+                    } catch (Throwable e) {
+                        LOGGER.error("Dummy connection failed", e);
+
+                        MinecraftClient.getInstance().execute(() -> {
+                            if (!isAttemptCurrent(attempt)) {
+                                return;
+                            }
+
+                            connecting = false;
+
+                            if (dummyPendingConnection != null
+                                    && dummyPendingConnection == dummyActiveConnection) {
+                                dummyActiveConnection = null;
+                            }
+
+                            dummyPendingConnection = null;
+                            reconfiguring = false;
+                        });
                     }
-                });
-            }
-        }, "Dummy-Netty-Thread");
+                },
+                "Dummy-Netty-Thread"
+        );
 
         connectThread.setDaemon(true);
         connectThread.start();
@@ -992,36 +1013,27 @@ public class DummyManager {
         MinecraftClient client = MinecraftClient.getInstance();
 
         client.execute(() -> {
-            String nick =
-                    DummyConfig.getInstance().getDummyNick();
-
-            LOGGER.info(
-                    "[DummyMod-Manager] Transferring dummy '{}' to {}:{}",
-                    nick,
-                    host,
-                    port
-            );
+            String nick = DummyConfig.getInstance().getDummyNick();
 
             closeDummyConnection(true);
 
-            long attempt =
-                    connectionAttemptCounter.incrementAndGet();
+            long attempt = connectionAttemptCounter.incrementAndGet();
 
             activeConnectionAttempt = attempt;
             connecting = true;
 
-            ServerAddress serverAddress =
-                    new ServerAddress(host, port);
+            ServerAddress serverAddress = new ServerAddress(host, port);
 
-            Thread transferThread = new Thread(
-                    () -> connect(
-                            serverAddress,
-                            nick,
-                            true,
-                            attempt
-                    ),
-                    "Dummy-Transfer-Thread"
-            );
+            Thread transferThread =
+                    new Thread(
+                            () -> connect(
+                                    serverAddress,
+                                    nick,
+                                    true,
+                                    attempt
+                            ),
+                            "Dummy-Transfer-Thread"
+                    );
 
             transferThread.setDaemon(true);
             transferThread.start();
@@ -1039,62 +1051,51 @@ public class DummyManager {
                     AllowedAddressResolver.DEFAULT.resolve(serverAddress);
 
             InetSocketAddress target =
-                    resolved
-                            .map(Address::getInetSocketAddress)
-                            .orElseGet(() -> new InetSocketAddress(
-                                    serverAddress.getAddress(),
-                                    serverAddress.getPort()
-                            ));
+                    resolved.map(Address::getInetSocketAddress)
+                            .orElseGet(
+                                    () -> new InetSocketAddress(
+                                            serverAddress.getAddress(),
+                                            serverAddress.getPort()
+                                    )
+                            );
 
-            String host =
-                    serverAddress.getAddress();
-
-            LOGGER.info(
-                    "[DummyMod-Manager] {} dummy '{}' to {}:{}...",
-                    transfer ? "Transferring" : "Connecting",
-                    nick,
-                    host,
-                    target.getPort()
-            );
-
-            if (!isAttemptCurrent(attempt)) return;
+            if (!isAttemptCurrent(attempt)) {
+                return;
+            }
 
             ClientConnection connection =
                     new ClientConnection(NetworkSide.CLIENTBOUND);
 
-            if (!isAttemptCurrent(attempt)) return;
-
             dummyPendingConnection = connection;
+            dummyActiveConnection = connection;
 
-            boolean nativeTransport =
-                    MinecraftClient.getInstance()
-                            .options
-                            .shouldUseNativeTransport();
+            NetworkingBackend backend =
+                    NetworkingBackend.remote(
+                            MinecraftClient.getInstance()
+                                    .options
+                                    .shouldUseNativeTransport()
+                    );
 
             ChannelFuture future =
                     ClientConnection.connect(
                             target,
-                            NetworkingBackend.remote(nativeTransport),
+                            backend,
                             connection
                     );
 
             if (!future.awaitUninterruptibly(15, TimeUnit.SECONDS)) {
-                throw new IllegalStateException(
-                        "Превышено время ожидания подключения (15 секунд)"
-                );
+                throw new IllegalStateException("Connection timeout");
             }
 
             if (!future.isSuccess()) {
                 throw new IllegalStateException(
-                        "Не удалось открыть соединение",
+                        "Failed to open connection",
                         future.cause()
                 );
             }
 
             if (!isAttemptCurrent(attempt)) {
-                connection.disconnect(
-                        Text.literal("Dummy connection cancelled")
-                );
+                closeExpected(connection, "Dummy connection cancelled");
                 return;
             }
 
@@ -1108,7 +1109,7 @@ public class DummyManager {
                     new DummyLoginHandler(null, connection);
 
             connection.connect(
-                    host,
+                    serverAddress.getAddress(),
                     target.getPort(),
                     LoginStates.C2S,
                     LoginStates.S2C,
@@ -1119,62 +1120,50 @@ public class DummyManager {
             connection.send(
                     new LoginHelloC2SPacket(nick, uuid)
             );
-        } catch (Exception e) {
-            LOGGER.error(
-                    "[DummyMod-Manager] Dummy transfer failed",
-                    e
-            );
+        } catch (Throwable e) {
+            LOGGER.error("Dummy transfer failed", e);
 
             MinecraftClient.getInstance().execute(() -> {
-                if (!isAttemptCurrent(attempt)) return;
+                if (!isAttemptCurrent(attempt)) {
+                    return;
+                }
 
                 connecting = false;
-                dummyPendingConnection = null;
 
-                MinecraftClient mc =
-                        MinecraftClient.getInstance();
-
-                if (mc.player != null) {
-                    mc.player.sendMessage(
-                            Text.literal(
-                                    "§c[DummyMod] Ошибка перехода дамми: "
-                                            + e.getMessage()
-                            ),
-                            false
-                    );
+                if (dummyPendingConnection != null
+                        && dummyPendingConnection == dummyActiveConnection) {
+                    dummyActiveConnection = null;
                 }
+
+                dummyPendingConnection = null;
+                reconfiguring = false;
             });
         }
     }
 
     public static void disconnect() {
-        MinecraftClient client =
-                MinecraftClient.getInstance();
+        MinecraftClient client = MinecraftClient.getInstance();
 
         if (client != null && !client.isOnThread()) {
             client.execute(DummyManager::disconnect);
             return;
         }
 
-        if (disconnecting) return;
+        if (disconnecting) {
+            return;
+        }
 
         disconnecting = true;
 
         try {
             closeDummyConnection(false);
-        } catch (Throwable t) {
-            LOGGER.error(
-                    "[DummyMod-Manager] Error in disconnect",
-                    t
-            );
         } finally {
             disconnecting = false;
         }
     }
 
     private static void closeDummyConnection(boolean transferring) {
-        activeConnectionAttempt =
-                connectionAttemptCounter.incrementAndGet();
+        activeConnectionAttempt = connectionAttemptCounter.incrementAndGet();
 
         connecting = false;
         reconfiguring = false;
@@ -1184,15 +1173,16 @@ public class DummyManager {
             setControllingDummy(false);
         }
 
-        ClientConnection pending =
-                dummyPendingConnection;
-
+        ClientConnection pending = dummyPendingConnection;
         dummyPendingConnection = null;
 
-        ClientConnection active =
-                dummySession.networkHandler != null
-                        ? dummySession.networkHandler.getConnection()
-                        : null;
+        ClientConnection active = dummyActiveConnection;
+
+        if (active == null && dummySession.networkHandler != null) {
+            active = dummySession.networkHandler.getConnection();
+        }
+
+        dummyActiveConnection = null;
 
         closeExpected(
                 active,
@@ -1218,93 +1208,48 @@ public class DummyManager {
     }
 
     private static boolean isAttemptCurrent(long attempt) {
-        return activeConnectionAttempt == attempt
-                && connecting;
+        return activeConnectionAttempt == attempt && connecting;
     }
 
     private static void closeExpected(
             ClientConnection connection,
             String reason
     ) {
-        if (connection == null) return;
+        if (connection == null) {
+            return;
+        }
 
         expectedDisconnects.add(connection);
 
         if (connection.isOpen()) {
-            connection.disconnect(
-                    Text.literal(reason)
-            );
+            connection.disconnect(Text.literal(reason));
         }
 
         connection.handleDisconnection();
     }
 
     public static void tick(MinecraftClient client) {
-        // A reconfiguration/transfer may briefly invalidate the live fields. Recover
-        // the foreground context from our session snapshot through the full setWorld
-        // path instead of allowing WorldRenderer to remain detached from a world.
         if (client.world == null || client.player == null) {
-            PlayerSession fg =
-                    controllingDummy
-                            ? dummySession
-                            : mainSession;
-
-            if (fg.player != null && fg.world != null) {
-                client.player = fg.player;
-                client.interactionManager =
-                        fg.interactionManager;
-
-                syncClientWorld(
-                        client,
-                        fg.world,
-                        false
-                );
-
-                client.setCameraEntity(
-                        fg.player
-                );
-            } else {
-                return;
-            }
+            return;
         }
 
-        // Update main session reference while controlling main
-        if (!controllingDummy
-                && client.player != null
-                && client.world != null) {
-            mainSession.player =
-                    client.player;
-
-            mainSession.world =
-                    client.world;
-
-            mainSession.interactionManager =
-                    client.interactionManager;
-
-            mainSession.networkHandler =
-                    client.getNetworkHandler();
+        if (!controllingDummy) {
+            mainSession.player = client.player;
+            mainSession.world = client.world;
+            mainSession.interactionManager = client.interactionManager;
+            mainSession.networkHandler = client.getNetworkHandler();
 
             if (client.getSession() != null) {
-                mainSession.name =
-                        client.getSession().getUsername();
+                mainSession.name = client.getSession().getUsername();
             }
         }
 
-        // Tick the background session cleanly
         if (!controllingDummy) {
             if (dummySession.isValid()) {
-                tickBackgroundSession(
-                        dummySession,
-                        client
-                );
+                tickBackgroundSession(dummySession, client);
             }
-        } else {
-            if (mainSession.isValid()) {
-                tickBackgroundSession(
-                        mainSession,
-                        client
-                );
-            }
+        } else if (mainSession.isValid()) {
+            tickBackgroundSession(mainSession, client);
         }
     }
 
@@ -1312,74 +1257,48 @@ public class DummyManager {
             PlayerSession session,
             MinecraftClient client
     ) {
-        PlayerSession fg =
+        PlayerSession foreground =
                 controllingDummy
                         ? dummySession
                         : mainSession;
 
         try {
-            // Temporarily expose the background logical context to vanilla tick code.
-            // Intentionally do NOT call MinecraftClient#setWorld/WorldRenderer#setWorld
-            // here: the renderer must stay attached to the foreground non-null world.
-            client.player =
-                    session.player;
-
-            client.world =
-                    session.world;
-
-            client.interactionManager =
-                    session.interactionManager;
+            client.player = session.player;
+            client.world = session.world;
+            client.interactionManager = session.interactionManager;
 
             if (session.networkHandler != null
                     && session.networkHandler.getConnection() != null
                     && session.networkHandler.getConnection().isOpen()) {
-                session.networkHandler
-                        .getConnection()
-                        .tick();
-
+                session.networkHandler.getConnection().tick();
                 session.networkHandler.tick();
             }
 
             if (session.player != null) {
-                session.player.input =
-                        new Input(); // Keep idle input
-
+                session.player.input = new Input();
                 session.player.tick();
             }
 
             if (session.world != null) {
-                session.world.tick(
-                        () -> true
-                );
+                session.world.tick(() -> true);
             }
         } catch (Throwable t) {
-            long now =
-                    System.currentTimeMillis();
+            long now = System.currentTimeMillis();
 
-            if (now - lastBackgroundTickFailureLogMillis
-                    >= 5_000L) {
-                lastBackgroundTickFailureLogMillis =
-                        now;
+            if (now - lastBackgroundTickFailureLogMillis >= 5_000L) {
+                lastBackgroundTickFailureLogMillis = now;
 
                 LOGGER.warn(
-                        "[DummyMod-Manager] Background session tick failed; keeping the foreground session active",
+                        "Background session tick failed",
                         t
                 );
             }
         } finally {
-            // Restore the logical foreground context. Renderer-side world state was
-            // never changed during the background tick, so no null/stale render world
-            // can be introduced by background ticking.
-            if (fg.player != null
-                    && fg.world != null) {
-                client.player =
-                        fg.player;
-
-                client.world =
-                        fg.world;
-
-                client.interactionManager =
-                        fg.interactionManager;
+            if (foreground.player != null
+                    && foreground.world != null) {
+                client.player = foreground.player;
+                client.world = foreground.world;
+                client.interactionManager = foreground.interactionManager;
             }
         }
     }

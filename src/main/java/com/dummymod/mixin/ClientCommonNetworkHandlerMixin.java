@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@Mixin(ClientCommonNetworkHandler.class)
+@Mixin(value = ClientCommonNetworkHandler.class, priority = 500)
 public class ClientCommonNetworkHandlerMixin {
 
     @Inject(
@@ -24,37 +24,59 @@ public class ClientCommonNetworkHandlerMixin {
             at = @At("HEAD"),
             cancellable = true
     )
-    private void dummy$guardPacketDuringReconfiguration(Packet<?> packet, CallbackInfo ci) {
-        Object self = this;
-        if (!(self instanceof ClientPlayNetworkHandler)) {
+    private void dummy$guardPacketDuringReconfiguration(
+            Packet<?> packet,
+            CallbackInfo ci
+    ) {
+        /*
+         * ClientConfigurationNetworkHandler also extends
+         * ClientCommonNetworkHandler. Configuration packets must always
+         * remain allowed.
+         */
+        if (!((Object) this instanceof ClientPlayNetworkHandler)) {
             return;
         }
 
-        ClientCommonNetworkHandlerAccessor accessor = (ClientCommonNetworkHandlerAccessor) this;
-        ClientConnection connection = accessor.getConnection();
-
-        if (connection == null) {
-            return;
-        }
+        ClientConnection connection =
+                ((ClientCommonNetworkHandlerAccessor) this)
+                        .getConnection();
 
         if (!DummyManager.isDummyConnection(connection)) {
             return;
         }
 
+        /*
+         * Block stale PLAY-handler sends while the dummy connection is
+         * closed, reconfiguring, or has already switched away from a PLAY
+         * listener.
+         */
         if (!connection.isOpen()
                 || DummyManager.isDummyReconfiguring()
-                || !(connection.getPacketListener() instanceof ClientPlayNetworkHandler)) {
+                || !(connection.getPacketListener()
+                        instanceof ClientPlayNetworkHandler)) {
             ci.cancel();
         }
     }
 
-    @Inject(method = "onResourcePackSend", at = @At("HEAD"))
-    private void onResourcePackSendHead(ResourcePackSendS2CPacket packet, CallbackInfo ci) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null || !client.isOnThread()) return;
+    @Inject(
+            method = "onResourcePackSend",
+            at = @At("HEAD")
+    )
+    private void onResourcePackSendHead(
+            ResourcePackSendS2CPacket packet,
+            CallbackInfo ci
+    ) {
+        MinecraftClient client =
+                MinecraftClient.getInstance();
 
-        ClientCommonNetworkHandlerAccessor accessor = (ClientCommonNetworkHandlerAccessor) this;
-        ClientConnection connection = accessor.getConnection();
+        if (client == null || !client.isOnThread()) {
+            return;
+        }
+
+        ClientConnection connection =
+                ((ClientCommonNetworkHandlerAccessor) this)
+                        .getConnection();
+
         if (DummyManager.isDummyConnection(connection)) {
             client.getServerResourcePackProvider().init(
                     connection,
@@ -63,46 +85,109 @@ public class ClientCommonNetworkHandlerMixin {
         }
     }
 
-    @Inject(method = "onResourcePackSend", at = @At("RETURN"))
-    private void onResourcePackSendReturn(ResourcePackSendS2CPacket packet, CallbackInfo ci) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null || !client.isOnThread()) return;
+    @Inject(
+            method = "onResourcePackSend",
+            at = @At("RETURN")
+    )
+    private void onResourcePackSendReturn(
+            ResourcePackSendS2CPacket packet,
+            CallbackInfo ci
+    ) {
+        MinecraftClient client =
+                MinecraftClient.getInstance();
 
-        ClientCommonNetworkHandlerAccessor accessor = (ClientCommonNetworkHandlerAccessor) this;
-        ClientConnection connection = accessor.getConnection();
+        if (client == null || !client.isOnThread()) {
+            return;
+        }
+
+        ClientConnection connection =
+                ((ClientCommonNetworkHandlerAccessor) this)
+                        .getConnection();
+
         if (DummyManager.isDummyConnection(connection)) {
             client.getServerResourcePackProvider()
                     .getPackLoadFuture(packet.id())
-                    .whenComplete((ignored, error) -> client.execute(DummyManager::restoreMainResourcePackConnection));
+                    .whenComplete(
+                            (ignored, error) ->
+                                    client.execute(
+                                            DummyManager::restoreMainResourcePackConnection
+                                    )
+                    );
         }
     }
 
-    @Inject(method = "onServerTransfer", at = @At("HEAD"), cancellable = true)
-    private void onServerTransferHead(ServerTransferS2CPacket packet, CallbackInfo ci) {
-        ClientCommonNetworkHandler handler = (ClientCommonNetworkHandler) (Object) this;
-        ClientCommonNetworkHandlerAccessor accessor = (ClientCommonNetworkHandlerAccessor) handler;
-        if (DummyManager.isDummyConnection(accessor.getConnection())) {
+    @Inject(
+            method = "onServerTransfer",
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private void onServerTransferHead(
+            ServerTransferS2CPacket packet,
+            CallbackInfo ci
+    ) {
+        ClientConnection connection =
+                ((ClientCommonNetworkHandlerAccessor) this)
+                        .getConnection();
+
+        if (!DummyManager.isDummyConnection(connection)) {
+            return;
+        }
+
+        ci.cancel();
+
+        DummyManager.transfer(
+                packet.host(),
+                packet.port()
+        );
+    }
+
+    @Inject(
+            method = "onDisconnected",
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private void onDisconnectedHead(
+            DisconnectionInfo info,
+            CallbackInfo ci
+    ) {
+        ClientCommonNetworkHandler handler =
+                (ClientCommonNetworkHandler) (Object) this;
+
+        ClientConnection connection =
+                ((ClientCommonNetworkHandlerAccessor) this)
+                        .getConnection();
+
+        if (DummyManager.isDummyConnection(connection)) {
             ci.cancel();
-            DummyManager.transfer(packet.host(), packet.port());
-        }
-    }
 
-    @Inject(method = "onDisconnected", at = @At("HEAD"), cancellable = true)
-    private void onDisconnectedHead(DisconnectionInfo info, CallbackInfo ci) {
-        ClientCommonNetworkHandler handler = (ClientCommonNetworkHandler) (Object) this;
-        ClientCommonNetworkHandlerAccessor accessor = (ClientCommonNetworkHandlerAccessor) handler;
-        if (DummyManager.isDummyConnection(accessor.getConnection())) {
-            ci.cancel(); // Prevent disconnecting the main Minecraft client
-            if (DummyManager.consumeExpectedDisconnect(accessor.getConnection())) {
+            if (DummyManager.consumeExpectedDisconnect(connection)) {
                 return;
             }
-            DummyManager.onConnectionClosed(accessor.getConnection());
-            MinecraftClient mc = MinecraftClient.getInstance();
-            if (mc != null && mc.player != null) {
-                String reason = info.reason() != null ? info.reason().getString() : "отключен";
-                mc.player.sendMessage(Text.literal("§6[DummyMod] Дамми отключен: §7" + reason), false);
+
+            DummyManager.onConnectionClosed(connection);
+
+            MinecraftClient client =
+                    MinecraftClient.getInstance();
+
+            if (client != null && client.player != null) {
+                String reason =
+                        info.reason() == null
+                                ? "disconnected"
+                                : info.reason().getString();
+
+                client.player.sendMessage(
+                        Text.literal(
+                                "§6[DummyMod] Dummy disconnected: §7"
+                                        + reason
+                        ),
+                        false
+                );
             }
-        } else if (DummyManager.mainSession.networkHandler == handler) {
+
+            return;
+        }
+
+        if (DummyManager.mainSession.networkHandler == handler) {
             DummyManager.disconnect();
             DummyManager.mainSession.clear();
         }
