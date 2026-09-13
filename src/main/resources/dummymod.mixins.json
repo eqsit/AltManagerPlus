@@ -15,7 +15,9 @@
     "MinecraftClientMixin",
     "MinecraftClientAccessor",
     "ClientPlayerEntityMixin",
-    "WorldRendererMixin"
+    "WorldRendererMixin",
+    "ParticleMixin",
+    "ParticleManagerMixin"
   ],
   "injectors": {
     "defaultRequire": 1
