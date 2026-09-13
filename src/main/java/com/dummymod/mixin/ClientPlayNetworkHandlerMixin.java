@@ -44,7 +44,6 @@ public class ClientPlayNetworkHandlerMixin {
         }
 
         ci.cancel();
-        DummyManager.beginDummyReconfiguration(connection);
         ClientConnectionState state = new ClientConnectionState(
                 new ClientChunkLoadProgress(),
                 handler.getProfile(),
@@ -65,6 +64,7 @@ public class ClientPlayNetworkHandlerMixin {
         connection.transitionInbound(ConfigurationStates.S2C, configHandler);
         connection.send(AcknowledgeReconfigurationC2SPacket.INSTANCE);
         connection.transitionOutbound(ConfigurationStates.C2S);
+        DummyManager.beginDummyReconfiguration(connection);
     }
 
     @Inject(method = "onGameJoin", at = @At("HEAD"), cancellable = true)
