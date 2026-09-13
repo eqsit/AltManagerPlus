@@ -201,6 +201,9 @@ public class DummyManager {
             dummySession.player.input = new KeyboardInput(client.options);
 
             client.worldRenderer.setWorld(dummySession.world);
+            if (client.particleManager != null) {
+                client.particleManager.setWorld(dummySession.world);
+            }
             client.setCameraEntity(dummySession.player);
             restoreVisibleChat(dummySession, client);
 
@@ -243,6 +246,9 @@ public class DummyManager {
             mainSession.player.input = new KeyboardInput(client.options);
 
             client.worldRenderer.setWorld(mainSession.world);
+            if (client.particleManager != null) {
+                client.particleManager.setWorld(mainSession.world);
+            }
             client.setCameraEntity(mainSession.player);
             restoreVisibleChat(mainSession, client);
 
