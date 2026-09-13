@@ -8,6 +8,8 @@ import net.minecraft.client.network.ClientConnectionState;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.world.ClientChunkLoadProgress;
 import net.minecraft.network.ClientConnection;
+import net.minecraft.network.listener.PacketListener;
+import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.DeathMessageS2CPacket;
 import net.minecraft.network.packet.c2s.play.AcknowledgeReconfigurationC2SPacket;
 import net.minecraft.network.packet.s2c.play.EnterReconfigurationS2CPacket;
@@ -28,6 +30,34 @@ import java.util.List;
 
 @Mixin(ClientPlayNetworkHandler.class)
 public class ClientPlayNetworkHandlerMixin {
+
+    @Inject(
+            method = "sendPacket(Lnet/minecraft/network/packet/Packet;)V",
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private void dummy$guardPacketDuringReconfiguration(
+            Packet<?> packet,
+            CallbackInfo ci
+    ) {
+        ClientPlayNetworkHandler handler = (ClientPlayNetworkHandler) (Object) this;
+        ClientCommonNetworkHandlerAccessor accessor = (ClientCommonNetworkHandlerAccessor) handler;
+        ClientConnection connection = accessor.getConnection();
+
+        if (connection == null) {
+            return;
+        }
+
+        if (!DummyManager.isDummyConnection(connection)) {
+            return;
+        }
+
+        if (!connection.isOpen()
+                || DummyManager.isDummyReconfiguring()
+                || !(connection.getPacketListener() instanceof ClientPlayNetworkHandler)) {
+            ci.cancel();
+        }
+    }
 
     @Inject(method = "onEnterReconfiguration", at = @At("HEAD"), cancellable = true)
     private void onEnterReconfigurationHead(EnterReconfigurationS2CPacket packet, CallbackInfo ci) {

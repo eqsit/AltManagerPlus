@@ -55,6 +55,7 @@ public class DummyManager {
     private static volatile boolean controllingDummy = false;
     private static volatile boolean connecting = false;
     private static volatile boolean disconnecting = false;
+    private static volatile boolean reconfiguring = false;
     private static volatile boolean resumeDummyControlAfterReconfiguration = false;
     private static volatile ClientConnection dummyPendingConnection;
     private static final AtomicLong connectionAttemptCounter = new AtomicLong();
@@ -71,6 +72,10 @@ public class DummyManager {
 
     public static boolean isConnecting() {
         return connecting;
+    }
+
+    public static boolean isDummyReconfiguring() {
+        return reconfiguring;
     }
 
     public static boolean isControllingDummy() {
@@ -111,6 +116,7 @@ public class DummyManager {
     public static void beginDummyReconfiguration(ClientConnection connection) {
         if (!isDummyConnection(connection)) return;
 
+        reconfiguring = true;
         boolean wasControllingDummy = controllingDummy;
         if (wasControllingDummy) {
             setControllingDummy(false);
@@ -405,6 +411,7 @@ public class DummyManager {
         dummySession.interactionManager = interactionManager;
         dummySession.networkHandler = handler;
         dummySession.name = handler.getProfile().name();
+        reconfiguring = false;
 
         // Tell the server the player finished loading chunks and can move/spawn
         accessor.setLoaded(true);
@@ -1170,6 +1177,7 @@ public class DummyManager {
                 connectionAttemptCounter.incrementAndGet();
 
         connecting = false;
+        reconfiguring = false;
         resumeDummyControlAfterReconfiguration = false;
 
         if (controllingDummy) {
