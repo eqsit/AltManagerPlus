@@ -8,6 +8,7 @@ import net.minecraft.network.listener.PacketListener;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.PacketType;
 import net.minecraft.network.packet.PlayPackets;
+import net.minecraft.network.packet.c2s.play.AcknowledgeReconfigurationC2SPacket;
 import net.minecraft.network.state.NetworkState;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -22,8 +23,7 @@ import java.util.Set;
 @Mixin(ClientConnection.class)
 public class ClientConnectionMixin {
 
-    private static final Set<PacketType<?>> DUMMYMOD_PLAY_PACKET_TYPES =
-            dummymod();
+    private static final Set<PacketType<?>> PLAY_PACKET_TYPES = collectPlayPacketTypes();
 
     @Inject(
             method = "transitionInbound",
@@ -34,14 +34,10 @@ public class ClientConnectionMixin {
             T listener,
             CallbackInfo ci
     ) {
-        ClientConnection connection =
-                (ClientConnection) (Object) this;
+        ClientConnection connection = (ClientConnection) (Object) this;
 
         if (listener instanceof ClientPlayNetworkHandler playHandler) {
-            DummyManager.registerPlayHandler(
-                    connection,
-                    playHandler
-            );
+            DummyManager.registerPlayHandler(connection, playHandler);
         }
     }
 
@@ -50,16 +46,16 @@ public class ClientConnectionMixin {
             at = @At("HEAD"),
             cancellable = true
     )
-    private void dummymod(
+    private void guardDirectPacketSend(
             Packet<?> packet,
             ChannelFutureListener listener,
             boolean flush,
             CallbackInfo ci
     ) {
-        ClientConnection connection =
-                (ClientConnection) (Object) this;
+        ClientConnection connection = (ClientConnection) (Object) this;
 
-        if (!DummyManager.isDummyConnection(connection)) {
+        // AcknowledgeReconfigurationC2SPacket must always pass through before outbound transition
+        if (packet instanceof AcknowledgeReconfigurationC2SPacket) {
             return;
         }
 
@@ -68,22 +64,25 @@ public class ClientConnectionMixin {
             return;
         }
 
-        if ((DummyManager.isDummyReconfiguring()
-                || !(connection.getPacketListener()
-                        instanceof ClientPlayNetworkHandler))
-                && dummymod(packet)) {
-            ci.cancel();
+        // If the packet belongs to the PLAY protocol, make sure the connection is actually in PLAY state
+        if (isPlayPacket(packet)) {
+            if (DummyManager.isDummyConnection(connection)) {
+                if (DummyManager.isDummyReconfiguring() || !(connection.getPacketListener() instanceof ClientPlayNetworkHandler)) {
+                    ci.cancel();
+                }
+            } else {
+                if (!(connection.getPacketListener() instanceof ClientPlayNetworkHandler)) {
+                    ci.cancel();
+                }
+            }
         }
     }
 
-    private static boolean dummymod(Packet<?> packet) {
-        return packet != null
-                && DUMMYMOD_PLAY_PACKET_TYPES.contains(
-                        packet.getPacketType()
-                );
+    private static boolean isPlayPacket(Packet<?> packet) {
+        return packet != null && PLAY_PACKET_TYPES.contains(packet.getPacketType());
     }
 
-    private static Set<PacketType<?>> dummymod() {
+    private static Set<PacketType<?>> collectPlayPacketTypes() {
         Set<PacketType<?>> packetTypes = new HashSet<>();
 
         try {
