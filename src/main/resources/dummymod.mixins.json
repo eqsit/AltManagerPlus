@@ -1,0 +1,22 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.dummymod.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "GameMenuScreenMixin",
+    "ClientPlayNetworkHandlerMixin",
+    "ClientPlayNetworkHandlerAccessor",
+    "ClientCommonNetworkHandlerAccessor",
+    "ClientConnectionMixin",
+    "ClientConfigurationNetworkHandlerMixin",
+    "ClientCommonNetworkHandlerMixin",
+    "PacketApplyBatcherEntryMixin",
+    "MinecraftClientMixin",
+    "MinecraftClientAccessor",
+    "ClientPlayerEntityMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

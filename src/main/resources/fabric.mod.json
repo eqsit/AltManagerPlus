@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "dummymod",
+  "version": "${version}",
+  "name": "DummyMod",
+  "description": "Мод на дамми (второго игрока) с возможностью подключения на сервер и переключения управления.",
+  "authors": [
+    "Nous Research"
+  ],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.dummymod.DummyMod"
+    ]
+  },
+  "mixins": [
+    "dummymod.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

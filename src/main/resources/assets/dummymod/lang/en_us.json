@@ -1,0 +1,16 @@
+{
+  "key.dummymod.switch": "Switch Control (Main / Dummy)",
+  "category.dummymod.general": "Dummy Mod",
+  "dummymod.menu.connect": "Connect Dummy",
+  "dummymod.menu.disconnect": "Disconnect Dummy",
+  "dummymod.menu.control_main": "Control: MAIN",
+  "dummymod.menu.control_dummy": "Control: DUMMY",
+  "dummymod.menu.nick_placeholder": "Dummy nickname...",
+  "dummymod.msg.switched_main": "§6[DummyMod] §fSwitched control to: §bMAIN §7(%s)",
+  "dummymod.msg.switched_dummy": "§6[DummyMod] §fSwitched control to: §aDUMMY §7(%s)",
+  "dummymod.msg.not_connected": "§c[DummyMod] Dummy is not connected!",
+  "dummymod.msg.connecting": "§e[DummyMod] Connecting dummy '%s' to %s:%d...",
+  "dummymod.msg.connected": "§a[DummyMod] Dummy '%s' connected successfully!",
+  "dummymod.msg.disconnected": "§c[DummyMod] Dummy disconnected (%s)",
+  "dummymod.msg.singleplayer_warning": "§c[DummyMod] Dummy only works on multiplayer servers!"
+}

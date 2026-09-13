@@ -1,0 +1,16 @@
+{
+  "key.dummymod.switch": "Переключить управление (Основа / Дамми)",
+  "category.dummymod.general": "Dummy Mod",
+  "dummymod.menu.connect": "Подключить дамми",
+  "dummymod.menu.disconnect": "Отключить дамми",
+  "dummymod.menu.control_main": "Управление: ОСНОВА",
+  "dummymod.menu.control_dummy": "Управление: ДАММИ",
+  "dummymod.menu.nick_placeholder": "Ник дамми...",
+  "dummymod.msg.switched_main": "§6[DummyMod] §fУправление переключено на: §bОСНОВА §7(%s)",
+  "dummymod.msg.switched_dummy": "§6[DummyMod] §fУправление переключено на: §aДАММИ §7(%s)",
+  "dummymod.msg.not_connected": "§c[DummyMod] Дамми не подключен!",
+  "dummymod.msg.connecting": "§e[DummyMod] Подключение дамми '%s' к %s:%d...",
+  "dummymod.msg.connected": "§a[DummyMod] Дамми '%s' успешно подключен!",
+  "dummymod.msg.disconnected": "§c[DummyMod] Дамми отключен (%s)",
+  "dummymod.msg.singleplayer_warning": "§c[DummyMod] Дамми работает только на мультиплеер-серверах!"
+}
