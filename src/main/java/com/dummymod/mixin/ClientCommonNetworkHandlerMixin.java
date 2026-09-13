@@ -25,6 +25,11 @@ public class ClientCommonNetworkHandlerMixin {
             cancellable = true
     )
     private void dummy$guardPacketDuringReconfiguration(Packet<?> packet, CallbackInfo ci) {
+        Object self = this;
+        if (!(self instanceof ClientPlayNetworkHandler)) {
+            return;
+        }
+
         ClientCommonNetworkHandlerAccessor accessor = (ClientCommonNetworkHandlerAccessor) this;
         ClientConnection connection = accessor.getConnection();
 
