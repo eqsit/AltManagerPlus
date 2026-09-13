@@ -14,7 +14,8 @@
     "PacketApplyBatcherEntryMixin",
     "MinecraftClientMixin",
     "MinecraftClientAccessor",
-    "ClientPlayerEntityMixin"
+    "ClientPlayerEntityMixin",
+    "WorldRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1
