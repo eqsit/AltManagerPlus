@@ -23,6 +23,53 @@ dependencies {
     mappings "net.fabricmc:yarn:${project.yarn_mappings}"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    // DummyMod requires the patched Baritone API that exposes per-instance client contexts.
+    // Explicit properties always win so CI/local layouts can point at arbitrary artifacts.
+    def baritoneApiJar = project.findProperty('baritoneApiJar') != null
+            ? file(project.findProperty('baritoneApiJar'))
+            : [
+                file('../baritone/fabric/build/libs/baritone-api-fabric-1.17.0-dirty.jar'),
+                file('../baritone/dist/baritone-api-fabric-1.17.0-dirty.jar'),
+                file('libs/baritone-api-fabric-1.17.0-dirty.jar'),
+                file('baritone-api-fabric-1.17.0-dirty.jar')
+              ].find { it.exists() }
+
+    if (baritoneApiJar == null || !baritoneApiJar.exists()) {
+        throw new GradleException(
+                "Patched Baritone API not found. Build ../baritone first or pass " +
+                "-PbaritoneApiJar=/path/to/baritone-api-fabric-1.17.0-dirty.jar")
+    }
+
+    // The normal patched Fabric runtime is preferred. Standalone dirty builds are accepted
+    // as fallbacks because Baritone's output filename can vary by build task/version.
+    def baritoneRuntimeJar = project.findProperty('baritoneRuntimeJar') != null
+            ? file(project.findProperty('baritoneRuntimeJar'))
+            : [
+                file('../baritone/fabric/build/libs/baritone-fabric-1.17.0-dirty.jar'),
+                file('../baritone/fabric/build/libs/baritone-standalone-fabric-1.17.0-dirty.jar'),
+                file('../baritone/fabric/build/libs/baritone-fabric-1.17.0-dirty-standalone.jar'),
+                file('../baritone/dist/baritone-fabric-1.17.0-dirty.jar'),
+                file('../baritone/dist/baritone-standalone-fabric-1.17.0-dirty.jar'),
+                file('libs/baritone-fabric-1.17.0-dirty.jar'),
+                file('libs/baritone-standalone-fabric-1.17.0-dirty.jar'),
+                file('libs/baritone-fabric-1.17.0-dirty-standalone.jar'),
+                file('baritone-fabric-1.17.0-dirty.jar'),
+                file('baritone-standalone-fabric-1.17.0-dirty.jar'),
+                file('baritone-fabric-1.17.0-dirty-standalone.jar')
+              ].find { it.exists() }
+
+    if (baritoneRuntimeJar == null || !baritoneRuntimeJar.exists()) {
+        throw new GradleException(
+                "Patched Fabric Baritone runtime not found. Expected " +
+                "../baritone/fabric/build/libs/baritone-fabric-1.17.0-dirty.jar " +
+                "(standalone dirty is also accepted), or pass " +
+                "-PbaritoneRuntimeJar=/path/to/baritone-fabric-1.17.0-dirty.jar")
+    }
+
+    // Compile against the patched API, use the patched runtime in dev, and nest that runtime
+    // into DummyMod's remapped output so users install a single mod JAR.
+    modCompileOnly files(baritoneApiJar)
+    modRuntimeOnly files(baritoneRuntimeJar)
 }
 
 processResources {

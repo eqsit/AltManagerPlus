@@ -19,7 +19,7 @@ public class ClientPlayerEntityMixin {
             CallbackInfoReturnable<Boolean> cir
     ) {
         ClientPlayerEntity player = (ClientPlayerEntity) (Object) this;
-        if (player == DummyManager.dummySession.player || player == DummyManager.mainSession.player) {
+        if (DummyManager.isSessionPlayer(player)) {
             cir.setReturnValue(true);
         }
     }

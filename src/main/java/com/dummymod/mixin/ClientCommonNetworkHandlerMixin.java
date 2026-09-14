@@ -51,7 +51,7 @@ public class ClientCommonNetworkHandlerMixin {
          * listener.
          */
         if (!connection.isOpen()
-                || DummyManager.isDummyReconfiguring()
+                || DummyManager.isDummyReconfiguring(connection)
                 || !(connection.getPacketListener()
                         instanceof ClientPlayNetworkHandler)) {
             ci.cancel();
@@ -135,10 +135,7 @@ public class ClientCommonNetworkHandlerMixin {
 
         ci.cancel();
 
-        DummyManager.transfer(
-                packet.host(),
-                packet.port()
-        );
+        DummyManager.transfer(connection, packet.host(), packet.port());
     }
 
     @Inject(
@@ -188,7 +185,7 @@ public class ClientCommonNetworkHandlerMixin {
         }
 
         if (DummyManager.mainSession.networkHandler == handler) {
-            DummyManager.disconnect();
+            DummyManager.disconnectAll();
             DummyManager.mainSession.clear();
         }
     }

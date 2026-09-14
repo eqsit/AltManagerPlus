@@ -1,6 +1,7 @@
 package com.dummymod.dummy.network;
 
 import com.dummymod.dummy.DummyManager;
+import com.dummymod.dummy.PlayerSession;
 import net.minecraft.client.ClientBrandRetriever;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.hud.ChatHud;
@@ -42,11 +43,10 @@ public class DummyLoginHandler implements ClientLoginPacketListener {
             LoggerFactory.getLogger("DummyMod-Login");
 
     private final ClientConnection connection;
+    private final PlayerSession session;
 
-    public DummyLoginHandler(
-            Object dummyClient,
-            ClientConnection connection
-    ) {
+    public DummyLoginHandler(PlayerSession session, ClientConnection connection) {
+        this.session = session;
         this.connection = connection;
     }
 
@@ -87,7 +87,7 @@ public class DummyLoginHandler implements ClientLoginPacketListener {
                 );
             }
 
-            DummyManager.disconnect();
+            DummyManager.disconnectSession(this.session);
         });
     }
 
@@ -123,7 +123,7 @@ public class DummyLoginHandler implements ClientLoginPacketListener {
                         null,
                         client.getCurrentServerEntry(),
                         null,
-                        DummyManager.getCookies(),
+                        this.session.cookies,
                         new ChatHud.ChatState(
                                 List.of(),
                                 List.of(),
@@ -198,7 +198,7 @@ public class DummyLoginHandler implements ClientLoginPacketListener {
                 );
             }
 
-            DummyManager.disconnect();
+            DummyManager.disconnectSession(this.session);
         });
     }
 
@@ -248,7 +248,7 @@ public class DummyLoginHandler implements ClientLoginPacketListener {
         this.connection.send(
                 new CookieResponseC2SPacket(
                         packet.key(),
-                        DummyManager.getCookie(packet.key())
+                        DummyManager.getCookie(this.connection, packet.key())
                 )
         );
     }

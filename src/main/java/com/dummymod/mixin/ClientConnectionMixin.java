@@ -2,6 +2,9 @@ package com.dummymod.mixin;
 
 import com.dummymod.dummy.DummyManager;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelPipeline;
+import com.dummymod.dummy.proxy.ProxyBridge;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.listener.PacketListener;
@@ -13,7 +16,6 @@ import net.minecraft.network.state.NetworkState;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -67,7 +69,7 @@ public class ClientConnectionMixin {
         // If the packet belongs to the PLAY protocol, make sure the connection is actually in PLAY state
         if (isPlayPacket(packet)) {
             if (DummyManager.isDummyConnection(connection)) {
-                if (DummyManager.isDummyReconfiguring() || !(connection.getPacketListener() instanceof ClientPlayNetworkHandler)) {
+                if (DummyManager.isDummyReconfiguring(connection) || !(connection.getPacketListener() instanceof ClientPlayNetworkHandler)) {
                     ci.cancel();
                 }
             } else {
@@ -76,6 +78,11 @@ public class ClientConnectionMixin {
                 }
             }
         }
+    }
+
+    @Inject(method = "addHandlers", at = @At("HEAD"))
+    private static void dummymod$injectProxy(ChannelPipeline pipeline, net.minecraft.network.NetworkSide side, boolean local, net.minecraft.network.handler.PacketSizeLogger packetSizeLogger, CallbackInfo ci) {
+        ProxyBridge.inject(pipeline);
     }
 
     private static boolean isPlayPacket(Packet<?> packet) {
