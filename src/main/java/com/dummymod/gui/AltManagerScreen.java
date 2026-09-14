@@ -169,13 +169,13 @@ public class AltManagerScreen extends Screen {
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         renderBackground(context, mouseX, mouseY, delta);
 
-        // Header title
-        context.drawCenteredTextWithShadow(textRenderer, title, width / 2, 6, 0xFFFFFF);
-
         List<PlayerSession> sessions = DummyManager.getSessions();
         int cardHeight = 56;
         int startY = 48 - scrollOffset;
 
+        // Paint card chrome first. Widgets are rendered by super.render below,
+        // then identity/status text is drawn last so it cannot disappear under
+        // widget/background rendering on newer GUI pipelines.
         for (int i = 0; i < sessions.size(); i++) {
             PlayerSession s = sessions.get(i);
             int y = startY + i * (cardHeight + 6);
@@ -184,43 +184,61 @@ public class AltManagerScreen extends Screen {
             boolean isActive = (DummyManager.getActiveSession() == s);
             int cardBg = isActive ? 0x991B3A1B : 0x881E1E1E;
             int cardBorder = isActive ? 0xFF55FF55 : 0xFF555555;
-
-            // Card background & border
             context.fill(16, y, width - 16, y + cardHeight, cardBg);
             context.drawStrokedRectangle(16, y, width - 32, cardHeight, cardBorder);
+        }
 
-            // Role & status
+        super.render(context, mouseX, mouseY, delta);
+
+        // Header title and all account identity/status text are intentionally
+        // rendered after child widgets for reliable visibility.
+        context.drawCenteredTextWithShadow(textRenderer, title, width / 2, 6, 0xFFFFFF);
+
+        for (int i = 0; i < sessions.size(); i++) {
+            PlayerSession s = sessions.get(i);
+            int y = startY + i * (cardHeight + 6);
+            if (y + cardHeight < 45 || y > height - 30) continue;
+
             Formatting roleColor = s.main ? Formatting.AQUA : Formatting.GOLD;
             Text statusText;
-            if (s.isValid()) statusText = Text.literal("🟢 В сети").formatted(Formatting.GREEN);
-            else if (s.connecting) statusText = Text.literal("🟡 Подключение...").formatted(Formatting.YELLOW);
-            else statusText = Text.literal("🔴 Отключен").formatted(Formatting.RED);
+            if (s.isValid()) statusText = Text.literal("В сети").formatted(Formatting.GREEN);
+            else if (s.connecting) statusText = Text.literal("Подключение...").formatted(Formatting.YELLOW);
+            else statusText = Text.literal("Отключен").formatted(Formatting.RED);
 
             Text headerLine = Text.empty()
-                    .append(Text.literal(DummyManager.getRoleLabel(s)).formatted(roleColor))
-                    .append(Text.literal(" " + s.displayName()).formatted(Formatting.WHITE))
-                    .append(Text.literal(" — ").formatted(Formatting.DARK_GRAY))
+                    .append(Text.literal(DummyManager.getRoleLabel(s)).formatted(roleColor, Formatting.BOLD))
+                    .append(Text.literal("  "))
+                    .append(Text.literal(s.displayName()).formatted(Formatting.WHITE, Formatting.BOLD))
+                    .append(Text.literal("  —  ").formatted(Formatting.DARK_GRAY))
                     .append(statusText);
-            context.drawTextWithShadow(textRenderer, headerLine, 24, y + 8, 0xFFFFFF);
+            context.drawTextWithShadow(textRenderer, headerLine, 24, y + 7, 0xFFFFFF);
 
-            // Stats / Position
             if (s.player != null && s.world != null) {
                 float hp = s.player.getHealth();
                 float maxHp = s.player.getMaxHealth();
                 String dim = s.world.getRegistryKey().getValue().getPath();
-                String posLine = String.format("§c❤ %.0f/%.0f  §7Поз: §f%.1f, %.1f, %.1f §8(%s)",
-                        hp, maxHp, s.player.getX(), s.player.getY(), s.player.getZ(), dim);
-                context.drawTextWithShadow(textRenderer, Text.literal(posLine), 24, y + 23, 0xCCCCCC);
+                Text statsLine = Text.empty()
+                        .append(Text.literal("HP ").formatted(Formatting.GRAY))
+                        .append(Text.literal(String.format("%.0f/%.0f", hp, maxHp)).formatted(Formatting.RED))
+                        .append(Text.literal("   Поз: ").formatted(Formatting.GRAY))
+                        .append(Text.literal(String.format("%.1f, %.1f, %.1f", s.player.getX(), s.player.getY(), s.player.getZ())).formatted(Formatting.WHITE))
+                        .append(Text.literal(" (" + dim + ")").formatted(Formatting.DARK_GRAY));
+                context.drawTextWithShadow(textRenderer, statsLine, 24, y + 22, 0xCCCCCC);
             } else {
-                context.drawTextWithShadow(textRenderer, Text.literal("§7Ожидание появления игрока в мире..."), 24, y + 23, 0x888888);
+                context.drawTextWithShadow(
+                        textRenderer,
+                        Text.literal("Ожидание появления игрока в мире...").formatted(Formatting.GRAY),
+                        24,
+                        y + 22,
+                        0xAAAAAA
+                );
             }
 
-            // Proxy & Baritone info
-            String proxyText = "§7Прокси: §b" + s.proxyLabel();
-            context.drawTextWithShadow(textRenderer, Text.literal(proxyText), 24, y + 38, 0xAAAAAA);
+            Text proxyLine = Text.empty()
+                    .append(Text.literal("Прокси: ").formatted(Formatting.GRAY))
+                    .append(Text.literal(s.proxyLabel()).formatted(Formatting.AQUA));
+            context.drawTextWithShadow(textRenderer, proxyLine, 24, y + 37, 0xAAAAAA);
         }
-
-        super.render(context, mouseX, mouseY, delta);
     }
 
     @Override

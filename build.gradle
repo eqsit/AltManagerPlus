@@ -66,8 +66,8 @@ dependencies {
                 "-PbaritoneRuntimeJar=/path/to/baritone-fabric-1.17.0-dirty.jar")
     }
 
-    // Compile against the patched API, use the patched runtime in dev, and nest that runtime
-    // into DummyMod's remapped output so users install a single mod JAR.
+    // Compile against the patched API and use the patched Fabric runtime in dev.
+    // The runtime remains a separate required mod JAR; it is deliberately not nested in DummyMod.
     modCompileOnly files(baritoneApiJar)
     modRuntimeOnly files(baritoneRuntimeJar)
 }

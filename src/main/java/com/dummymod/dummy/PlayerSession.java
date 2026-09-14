@@ -45,6 +45,8 @@ public class PlayerSession {
     public ChatHud.ChatState chatState = emptyChatState();
     /** Session-owned inventory/container/creative screen. Ordinary menus are never stored here. */
     public volatile Screen handledScreen;
+    /** Latched state of the global sprint StickyKeyBinding while this session is foreground. */
+    public volatile boolean sprintKeyLatched = false;
 
     public PlayerSession(long id, String name, boolean main) {
         this.id = id;

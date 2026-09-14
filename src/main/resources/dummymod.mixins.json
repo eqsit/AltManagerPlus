@@ -14,7 +14,11 @@
     "PacketApplyBatcherEntryMixin",
     "MinecraftClientMixin",
     "MinecraftClientAccessor",
+    "KeyBindingAccessor",
+    "EntityAccessor",
     "ClientPlayerEntityMixin",
+    "ClientPlayerEntityAccessor",
+    "ClientPlayerEntitySprintDiagnostics",
     "WorldRendererMixin",
     "ParticleMixin",
     "ParticleManagerMixin"

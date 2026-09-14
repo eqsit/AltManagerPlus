@@ -7,18 +7,23 @@ import com.dummymod.config.DummyConfig;
 import com.dummymod.dummy.baritone.BaritoneBridge;
 import com.dummymod.dummy.network.DummyLoginHandler;
 import com.dummymod.dummy.proxy.ProxyBridge;
+import com.dummymod.mixin.ClientCommonNetworkHandlerAccessor;
 import com.dummymod.mixin.ClientPlayNetworkHandlerAccessor;
+import com.dummymod.mixin.ClientPlayerEntityAccessor;
+import com.dummymod.mixin.KeyBindingAccessor;
 import com.dummymod.mixin.MinecraftClientAccessor;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import io.netty.channel.ChannelFuture;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.hud.ChatHud;
 import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.screen.world.LevelLoadingScreen;
 import net.minecraft.client.input.Input;
 import net.minecraft.client.input.KeyboardInput;
+import net.minecraft.client.option.Perspective;
 import net.minecraft.client.network.*;
 import net.minecraft.client.recipebook.ClientRecipeBook;
 import net.minecraft.client.resource.server.ServerResourcePackManager;
@@ -41,6 +46,7 @@ import net.minecraft.stat.StatHandler;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.PlayerInput;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -71,7 +77,20 @@ public final class DummyManager {
     public static final CopyOnWriteArrayList<PlayerSession> dummySessions = new CopyOnWriteArrayList<>();
     private static final Map<ClientConnection, PlayerSession> SESSION_BY_CONNECTION = new ConcurrentHashMap<>();
     private static final Set<ClientConnection> EXPECTED_DISCONNECTS = ConcurrentHashMap.newKeySet();
-    private record PacketContext(PlayerSession session, Screen screen) {}
+    private record PacketContext(
+            PlayerSession owner,
+            PlayerSession effectiveSession,
+            ClientPlayerEntity previousPlayer,
+            ClientWorld previousWorld,
+            ClientPlayerInteractionManager previousInteractionManager,
+            Screen previousScreen,
+            ChatHud.ChatState previousChatState,
+            ClientPlayerEntity contextPlayer,
+            ClientWorld contextWorld,
+            ClientPlayerInteractionManager contextInteractionManager,
+            Screen contextScreen,
+            boolean switched
+    ) {}
     private static final ThreadLocal<Deque<PacketContext>> PACKET_CONTEXT = ThreadLocal.withInitial(ArrayDeque::new);
     private static volatile PlayerSession activeSession = mainSession;
     private static volatile long lastBackgroundTickFailureLogMillis;
@@ -103,7 +122,18 @@ public final class DummyManager {
     public static PlayerSession getSession(ClientConnection connection) { return connection == null ? null : SESSION_BY_CONNECTION.get(connection); }
     public static PlayerSession getSession(ClientPlayNetworkHandler handler) { return handler == null ? null : getSession(handler.getConnection()); }
     public static PlayerSession getSession(PacketListener listener) {
-        if (listener instanceof ClientPlayNetworkHandler h) return getSession(h);
+        if (listener == null) return null;
+        if (listener instanceof ClientPlayNetworkHandler h) {
+            PlayerSession session = getSession(h);
+            if (session != null) return session;
+        }
+        if (listener instanceof ClientCommonNetworkHandler commonHandler) {
+            PlayerSession session = getSession(((ClientCommonNetworkHandlerAccessor) commonHandler).getConnection());
+            if (session != null) return session;
+        }
+        for (Map.Entry<ClientConnection, PlayerSession> entry : SESSION_BY_CONNECTION.entrySet()) {
+            if (entry.getKey().getPacketListener() == listener) return entry.getValue();
+        }
         for (PlayerSession s : dummySessions) if (s.networkHandler == listener) return s;
         return mainSession.networkHandler == listener ? mainSession : null;
     }
@@ -118,6 +148,10 @@ public final class DummyManager {
     public static boolean isConnected() { for (PlayerSession s : dummySessions) if (s.isValid()) return true; return false; }
     public static boolean isConnecting() { for (PlayerSession s : dummySessions) if (s.connecting) return true; return false; }
     public static boolean isControllingDummy() { return activeSession != mainSession; }
+
+    public static void onPlayerMovementComplete(ClientPlayerEntity player, boolean sprintingBefore) {
+        ControlDiagnostics.afterMovement(player, sprintingBefore);
+    }
 
     public static Map<Identifier, byte[]> getCookies(ClientConnection c) { PlayerSession s = getSession(c); return s == null ? Map.of() : s.cookies; }
     public static byte[] getCookie(ClientConnection c, Identifier key) { PlayerSession s = getSession(c); return s == null ? null : s.cookies.get(key); }
@@ -271,16 +305,20 @@ public final class DummyManager {
         if (target == activeSession) return true;
 
         PlayerSession old = activeSession;
+        saveToggleSprintState(old, client);
+        ControlDiagnostics.onSwitchAway(old, client);
         saveVisibleChat(old, client);
         captureSessionScreen(old, client);
         clearInactiveInput(old);
         if (target.player != null && target.player.isDead()) target.player.requestRespawn();
         activeSession = target;
+        restoreToggleSprintState(target, client);
         installForegroundSession(client, target);
         syncClientWorld(client, target.world, true);
         if (client.particleManager != null) client.particleManager.setWorld(target.world);
-        client.setCameraEntity(target.player); restoreVisibleChat(target, client);
+        focusForegroundCamera(client, target); restoreVisibleChat(target, client);
         restoreSessionScreen(target, client);
+        ControlDiagnostics.onSwitchTo(target, client);
         if (client.currentScreen instanceof DeathScreen || client.currentScreen instanceof LevelLoadingScreen) client.setScreen(null);
         client.mouse.lockCursor();
         notifySwitch(target);
@@ -305,8 +343,13 @@ public final class DummyManager {
 
     private static void captureSessionScreen(PlayerSession session, MinecraftClient client) {
         if (session == null || client == null) return;
-        if (isSessionOwnedScreen(client.currentScreen)) session.handledScreen = client.currentScreen;
-        else if (client.currentScreen == null) session.handledScreen = null;
+        captureSessionScreen(session, client.currentScreen);
+    }
+
+    private static void captureSessionScreen(PlayerSession session, Screen screen) {
+        if (session == null) return;
+        if (isSessionOwnedScreen(screen)) session.handledScreen = screen;
+        else if (screen == null) session.handledScreen = null;
     }
 
     private static void restoreSessionScreen(PlayerSession session, MinecraftClient client) {
@@ -317,12 +360,65 @@ public final class DummyManager {
         }
     }
 
+    private static boolean isToggleSprintEnabled(MinecraftClient client) {
+        return client != null && Boolean.TRUE.equals(client.options.getSprintToggled().getValue());
+    }
+
+    private static void saveToggleSprintState(PlayerSession session, MinecraftClient client) {
+        if (session == null || !isToggleSprintEnabled(client)) return;
+        session.sprintKeyLatched = client.options.sprintKey.isPressed();
+    }
+
+    private static void restoreToggleSprintState(PlayerSession session, MinecraftClient client) {
+        if (session == null || !isToggleSprintEnabled(client)) return;
+
+        // sprintKey is one global StickyKeyBinding. Calling setPressed here would
+        // run StickyKeyBinding's toggle semantics and invert the requested latch,
+        // so write KeyBinding.pressed directly through the narrowly-scoped accessor.
+        ((KeyBindingAccessor) client.options.sprintKey).dummymod$setPressedDirect(session.sprintKeyLatched);
+    }
+
     private static void restoreKeyboardInput(PlayerSession session, MinecraftClient client) {
         if (session == null || session.player == null || client == null) return;
-        // Always give the selected session a fresh KeyboardInput. This removes
-        // stale movement state left by background ticks/Baritone without
-        // globally unpressing key bindings, which previously broke held keys.
-        session.player.input = new KeyboardInput(client.options);
+
+        // Foreground control must start from vanilla keyboard state, not from the
+        // neutral Input used while this account was ticking in the background.
+        // Tick immediately so keys that are already held (including sprint) are
+        // visible on the very first foreground client tick after a switch.
+        KeyboardInput keyboardInput = new KeyboardInput(client.options);
+        keyboardInput.tick();
+        session.player.input = keyboardInput;
+
+        // ClientPlayerEntity keeps a few edge/packet fields outside Input. Reset
+        // only this foreground player's transient edges; never touch global key
+        // bindings or another session's Baritone input overrides.
+        ClientPlayerEntityAccessor accessor = (ClientPlayerEntityAccessor) session.player;
+        accessor.dummymod$setLastPlayerInput(PlayerInput.DEFAULT);
+        accessor.dummymod$setLastSprinting(session.player.isSprinting());
+        accessor.dummymod$setTicksLeftToDoubleTapSprint(0);
+    }
+
+    private static void focusForegroundCamera(MinecraftClient client, PlayerSession session) {
+        if (client == null || session == null || session.player == null || session.world == null) return;
+
+        // setCameraEntity is identity-based, but the renderer's Camera can still
+        // carry interpolation/focus from the previous account. Reset and update
+        // it against the selected world/entity so the first switch is correct
+        // even when both accounts spawned at exactly the same coordinates.
+        if (client.gameRenderer != null && client.gameRenderer.getCamera() != null) {
+            client.gameRenderer.getCamera().reset();
+        }
+        client.setCameraEntity(session.player);
+        if (client.gameRenderer != null && client.gameRenderer.getCamera() != null) {
+            Perspective perspective = client.options.getPerspective();
+            client.gameRenderer.getCamera().update(
+                    session.world,
+                    session.player,
+                    !perspective.isFirstPerson(),
+                    perspective.isFrontView(),
+                    1.0f
+            );
+        }
     }
 
     private static void clearInactiveInput(PlayerSession session) {
@@ -346,16 +442,113 @@ public final class DummyManager {
     }
 
     /**
-     * Background packet application must never replace the visible
-     * MinecraftClient account. Session-aware handlers and each packet's own
-     * ClientPlayNetworkHandler/ClientWorld carry the required state.
+     * Install the packet listener's owning logical session into only the
+     * MinecraftClient globals that vanilla packet handlers are allowed to use
+     * as session-local state. This is intentionally a direct field swap: it
+     * must not call setWorld, touch WorldRenderer/ParticleManager, move the
+     * camera, or replace a player's Input while a background packet is being
+     * applied.
+     *
+     * <p>The stack stores exact values from the enclosing context. That makes
+     * nested packet application safe: an inner packet restores the outer
+     * packet context, and the outer packet restores the real foreground.</p>
      */
     public static void beforePacketApply(PacketListener listener) {
-        // Deliberately no-op: global client context is foreground-only.
+        MinecraftClient client = MinecraftClient.getInstance();
+        Deque<PacketContext> stack = PACKET_CONTEXT.get();
+        PlayerSession owner = getSession(listener);
+        PlayerSession previousEffective = stack.isEmpty() ? activeSession : stack.peek().effectiveSession();
+
+        ClientPlayerEntity previousPlayer = client != null ? client.player : null;
+        ClientWorld previousWorld = client != null ? client.world : null;
+        ClientPlayerInteractionManager previousInteractionManager = client != null ? client.interactionManager : null;
+        Screen previousScreen = client != null ? client.currentScreen : null;
+        ChatHud.ChatState previousChatState = client != null && client.inGameHud != null
+                ? client.inGameHud.getChatHud().toChatState()
+                : null;
+
+        boolean switched = client != null && owner != null && owner != previousEffective;
+        PlayerSession effective = switched ? owner : previousEffective;
+
+        if (switched) {
+            // Direct assignments are deliberate. Calling setWorld/setScreen here
+            // would mutate renderer/camera/cursor state belonging to the visible
+            // account. Packet handlers may now safely resolve client.player/world/
+            // interactionManager against their own connection instead.
+            client.player = owner.player;
+            client.world = owner.world;
+            client.interactionManager = owner.interactionManager;
+            client.currentScreen = owner.handledScreen;
+            if (client.inGameHud != null && owner.chatState != null) {
+                client.inGameHud.getChatHud().restoreChatState(owner.chatState);
+            }
+        }
+
+        stack.push(new PacketContext(
+                owner,
+                effective,
+                previousPlayer,
+                previousWorld,
+                previousInteractionManager,
+                previousScreen,
+                previousChatState,
+                client != null ? client.player : null,
+                client != null ? client.world : null,
+                client != null ? client.interactionManager : null,
+                client != null ? client.currentScreen : null,
+                switched
+        ));
     }
 
     public static void afterPacketApply(PacketListener listener) {
-        // Deliberately no-op: there is no temporary global context to restore.
+        Deque<PacketContext> stack = PACKET_CONTEXT.get();
+        if (stack.isEmpty()) {
+            LOGGER.warn("afterPacketApply called without matching beforePacketApply for {}", listener);
+            return;
+        }
+
+        PacketContext context = stack.pop();
+        MinecraftClient client = MinecraftClient.getInstance();
+        PlayerSession owner = context.owner();
+
+        try {
+            if (client != null && owner != null) {
+                // Most packets mutate the installed player/world objects in place.
+                // Only copy a singleton reference back when vanilla actually
+                // replaced that reference. Custom dummy join/respawn handlers
+                // update PlayerSession directly, so unchanged temporary globals
+                // must not overwrite their newly-created session objects.
+                if (client.player != context.contextPlayer()) owner.player = client.player;
+                if (client.world != context.contextWorld()) owner.world = client.world;
+                if (client.interactionManager != context.contextInteractionManager()) {
+                    owner.interactionManager = client.interactionManager;
+                }
+
+                if (client.currentScreen != context.contextScreen()) {
+                    captureSessionScreen(owner, client.currentScreen);
+                }
+                if (client.inGameHud != null) {
+                    owner.chatState = client.inGameHud.getChatHud().toChatState();
+                }
+            }
+        } finally {
+            try {
+                if (client != null && context.switched()) {
+                    // Restore byte-for-byte object identity for the enclosing/visible
+                    // session. Do not derive this from activeSession: nested packet
+                    // application may have an outer temporary owner.
+                    client.player = context.previousPlayer();
+                    client.world = context.previousWorld();
+                    client.interactionManager = context.previousInteractionManager();
+                    client.currentScreen = context.previousScreen();
+                    if (client.inGameHud != null && context.previousChatState() != null) {
+                        client.inGameHud.getChatHud().restoreChatState(context.previousChatState());
+                    }
+                }
+            } finally {
+                if (stack.isEmpty()) PACKET_CONTEXT.remove();
+            }
+        }
     }
 
     public static void onDummyGameJoin(ClientPlayNetworkHandler handler, GameJoinS2CPacket packet) {
@@ -368,10 +561,12 @@ public final class DummyManager {
         ClientWorld world = new ClientWorld(handler, props, spawn.dimension(), spawn.dimensionType(), packet.viewDistance(), packet.simulationDistance(), client.worldRenderer, spawn.isDebug(), spawn.seed(), spawn.seaLevel()); a.setWorld(world);
         ClientPlayerInteractionManager im = new ClientPlayerInteractionManager(client, handler);
         ClientPlayerEntity player = im.createPlayer(world, new StatHandler(), new ClientRecipeBook()); player.setId(packet.playerEntityId()); player.init(); player.input = new Input(); world.addEntity(player);
+        session.player = player; session.world = world; session.interactionManager = im;
+        client.player = player; client.world = world; client.interactionManager = im;
         im.setGameModes(spawn.gameMode(), spawn.lastGameMode()); im.copyAbilities(player);
         player.setReducedDebugInfo(packet.reducedDebugInfo()); player.setShowsDeathScreen(packet.showDeathScreen()); player.setLimitedCraftingEnabled(packet.doLimitedCrafting());
         player.setLastDeathPos(spawn.lastDeathLocation()); player.setPortalCooldown(spawn.portalCooldown());
-        session.player = player; session.world = world; session.interactionManager = im; session.networkHandler = handler; session.setConfirmedProfileName(handler.getProfile().name()); session.activeConnection = handler.getConnection();
+        session.networkHandler = handler; session.setConfirmedProfileName(handler.getProfile().name()); session.activeConnection = handler.getConnection();
         a.setLoaded(true); if (handler.getConnection() != null && handler.getConnection().isOpen()) handler.getConnection().send(new PlayerLoadedC2SPacket()); a.setSecureChatEnforced(packet.enforcesSecureChat());
         BaritoneBridge.resolve(session);
         if (activeSession == session) restoreKeyboardInput(session, client); else clearInactiveInput(session);
@@ -401,7 +596,7 @@ public final class DummyManager {
         a.setLoaded(true);
         if (handler.getConnection() != null && handler.getConnection().isOpen()) handler.getConnection().send(new PlayerLoadedC2SPacket());
         session.player = player; session.interactionManager = im; session.handledScreen = null; BaritoneBridge.resolve(session);
-        if (activeSession == session) { installForegroundSession(client, session); syncClientWorld(client, world, changed); client.setCameraEntity(player); restoreSessionScreen(session, client); }
+        if (activeSession == session) { installForegroundSession(client, session); syncClientWorld(client, world, changed); focusForegroundCamera(client, session); restoreSessionScreen(session, client); }
         else clearInactiveInput(session);
     }
 
@@ -513,9 +708,15 @@ public final class DummyManager {
                 client.world = foreground.world;
                 client.interactionManager = foreground.interactionManager;
             }
-            if (client.getCameraEntity() != foreground.player) client.setCameraEntity(foreground.player);
+            if (client.getCameraEntity() != foreground.player
+                    || (client.gameRenderer != null
+                    && client.gameRenderer.getCamera() != null
+                    && client.gameRenderer.getCamera().getFocusedEntity() != foreground.player)) {
+                focusForegroundCamera(client, foreground);
+            }
             foreground.botController.tick(client);
             tickAutoclicker(foreground, client);
+            ControlDiagnostics.pollForeground(client, "client-tick-end");
         }
         for (PlayerSession s : getSessions()) {
             if (s != foreground && s.isValid()) tickBackgroundSession(s, client);
