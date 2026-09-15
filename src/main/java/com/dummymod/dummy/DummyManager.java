@@ -736,6 +736,9 @@ public final class DummyManager {
                 s.networkHandler.getConnection().tick();
                 s.networkHandler.tick();
             }
+            if (s.interactionManager != null) {
+                s.interactionManager.tick();
+            }
 
             boolean baritoneActive = BaritoneBridge.isAutomationActive(s);
             if (s.player != null && !baritoneActive) {

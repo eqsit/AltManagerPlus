@@ -19,6 +19,7 @@
     "ClientPlayerEntityMixin",
     "ClientPlayerEntityAccessor",
     "ClientPlayerEntitySprintDiagnostics",
+    "ClientPlayerInteractionManagerMixin",
     "WorldRendererMixin",
     "ParticleMixin",
     "ParticleManagerMixin"
