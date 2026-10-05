@@ -112,6 +112,13 @@ public final class RegressionChecks {
         check(!route.isEmpty() && route.getLast().equals(goal) && route.stream().anyMatch(p->p.y()>=3),"Creative route flies over blocking wall without scaffolding");
         var before=start;for(var p:route){check(before.distance(p)==1,"Flight never cuts solid corners");before=p;}
         check(FlightRoute.find(start,goal,p->p.equals(start),100).isEmpty(),"Unreachable flight goal bounded");
+        java.util.function.ToIntFunction<FlightRoute.Point> detour=p->p.y()==0 && p.x()>=0 && p.x()<=4 && p.z()>=0 && p.z()<=5 && (p.x()!=2 || p.z()==5)?1:0;
+        var longWalk=new FlightRoute.Search(start,List.of(goal),detour,2000);
+        while(!longWalk.done())longWalk.advance(2000,100_000_000);
+        check(longWalk.result().size()==14,"Walking fixture requires a long detour around a solid wall");
+        var shortWalk=new FlightRoute.Search(start,List.of(goal),detour,2000,8);
+        while(!shortWalk.done())shortWalk.advance(2000,100_000_000);
+        check(shortWalk.result().isEmpty() && shortWalk.visited()<100,"Creative walking budget rejects a long detour before spending time following it");
         var roof=new FlightRoute.Point(14,30,14);var room=new FlightRoute.Point(10,1,10);
         java.util.function.Predicate<FlightRoute.Point> palaceFree=p->{
             boolean inside=p.x()>=0 && p.x()<=26 && p.z()>=0 && p.z()<=26 && p.y()>=0 && p.y()<=29;
@@ -131,7 +138,14 @@ public final class RegressionChecks {
         var journal=new PassageJournal(passageFile);var brick=new PassageJournal.Entry(172,105,209,"minecraft:polished_blackstone_bricks");journal.remember(brick);
         check(new PassageJournal(passageFile).entries().equals(List.of(brick)),"Original passage blocks survive a restart before restoration");
         journal.remember(brick);check(journal.entries().size()==1,"Repeated excavation never replaces the saved original block");
+        var accessBrick=new PassageJournal.Entry(172,106,209,"minecraft:stone");journal.focus(brick);journal.remember(accessBrick);
+        var focusedJournal=new PassageJournal(passageFile);
+        check(brick.equals(focusedJournal.focus()) && focusedJournal.entries().contains(accessBrick),"Restoration dependency survives reopening access and restarting");
+        var legacyEntries=new com.google.gson.Gson().fromJson(Files.readString(passageFile),PassageJournal.Entry[].class);
+        check(legacyEntries.length==2,"Focused passage journal remains readable as the legacy entry array");
+        journal.restored(accessBrick);
         journal.restored(brick);check(new PassageJournal(passageFile).entries().isEmpty(),"Confirmed restoration clears the durable repair record");
+        check(new PassageJournal(passageFile).focus()==null,"Confirmed focused restoration clears the saved dependency");
         Files.delete(passageFile);Files.delete(passageFile.getParent());
         Path blockedJournal=Files.createTempFile("dummymod-blocked-journal-",".tmp");var failedJournal=new PassageJournal(blockedJournal.resolve("passage.json"));
         try{failedJournal.remember(brick);throw new AssertionError("Excavation journal accepted an unwritable destination");}catch(java.io.IOException expected){check(failedJournal.entries().isEmpty(),"Failed durable save leaves no in-memory permission to excavate");}finally{Files.delete(blockedJournal);}

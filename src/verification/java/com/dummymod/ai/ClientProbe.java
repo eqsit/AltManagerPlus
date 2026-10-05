@@ -23,6 +23,12 @@ public final class ClientProbe implements ClientModInitializer {
     private boolean checkpoint;
     private boolean passageSeen;
     private boolean carpetWalkSeen;
+    private long decorationStarted;
+    private double decorationDistance;
+    private net.minecraft.util.math.Vec3d decorationPosition;
+    private java.util.List<PassageJournal.Entry> decorationRepairs=java.util.List.of();
+    private boolean repairRestarted;
+    private int repairObserved=-1;
     private final java.util.Deque<String> interiorReset=new java.util.ArrayDeque<>();
     private int stressTotal;
     private com.google.gson.JsonObject stressDesign;
@@ -248,13 +254,37 @@ public final class ClientProbe implements ClientModInitializer {
                     for(var command:JsonParser.parseString(Files.readString(Path.of(System.getProperty("dummymod.probeSeed")))).getAsJsonArray())c.getNetworkHandler().sendChatCommand(command.getAsString());
                 }
                 if(wait<=100)return;
+                if(System.getProperty("dummymod.probeRepair")!=null) {
+                    decorationRepairs=java.util.List.of(new com.google.gson.Gson().fromJson(Files.readString(Path.of(System.getProperty("dummymod.probeRepair"))),PassageJournal.Entry[].class));
+                    var journal=new PassageJournal(CreativeBuilder.passageFile(creativeSession));
+                    if(!journal.entries().isEmpty())throw new AssertionError("Previous test left repairs unfinished");
+                    for(var e:decorationRepairs)journal.remember(e);
+                }
                 wait=0;building=new Building(creativeSession,BuildPlan.parse(stressDesign),ClientProbe::log);building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();
+                decorationStarted=System.nanoTime();decorationDistance=0;decorationPosition=new net.minecraft.util.math.Vec3d(creativeSession.player.getX(),creativeSession.player.getY(),creativeSession.player.getZ());
                 log("Decoration project: "+building.plan.name+", cells="+building.states.size());phase=31;return;
             }
             if(phase==31) {
                 building.tick(true);wait++;
+                var position=new net.minecraft.util.math.Vec3d(creativeSession.player.getX(),creativeSession.player.getY(),creativeSession.player.getZ());decorationDistance+=position.distanceTo(decorationPosition);decorationPosition=position;
+                if(Boolean.getBoolean("dummymod.probeRepairRestart") && !repairRestarted) {
+                    var journal=new PassageJournal(CreativeBuilder.passageFile(creativeSession));
+                    if(journal.entries().size()>decorationRepairs.size()) {
+                        if(repairObserved<0)repairObserved=wait;
+                        var updates=((com.dummymod.mixin.ClientWorldPredictionAccessor)creativeSession.world).dummymod$pendingUpdates();
+                        if(wait-repairObserved>=3 && ((com.dummymod.mixin.PendingUpdateManagerAccessor)updates).dummymod$blocks().isEmpty()) {
+                            if(journal.focus()==null)throw new AssertionError("Restoration order was not saved before opening access");
+                            building.stop();building=new Building(creativeSession,BuildPlan.parse(stressDesign),ClientProbe::log);building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();repairRestarted=true;
+                            log("PASS: buried repair resumed from disk while its foundation opening remains journalled");
+                        }
+                    }
+                }
                 if(ticks%100==0)log("Decoration remaining="+building.states.keySet().stream().filter(building::needs).count()+"; "+building.status()+"; "+building.diagnostic());
                 if(building.finished()) {
+                    for(var e:decorationRepairs)if(!creativeSession.world.getBlockState(new BlockPos(e.x(),e.y(),e.z())).equals(net.minecraft.registry.Registries.BLOCK.get(net.minecraft.util.Identifier.of(e.block())).getDefaultState()))throw new AssertionError("Forgotten repair at "+e);
+                    if(Boolean.getBoolean("dummymod.probeRepairRestart") && !repairRestarted)throw new AssertionError("Buried restoration restart was never exercised");
+                    var metrics=new com.google.gson.JsonObject();metrics.addProperty("ticks",wait);metrics.addProperty("seconds",(System.nanoTime()-decorationStarted)/1e9);metrics.addProperty("distance",decorationDistance);
+                    Files.writeString(Path.of("build/client-probe-metrics.json"),metrics.toString());log("Build metrics: "+metrics);
                     log("PASS: exact decoration project completed; every declared block and property matches");building.stop();
                     var h=c.getNetworkHandler();h.sendChatCommand("fill 180 -60 120 192 -52 124 air");h.sendChatCommand("fill 180 -61 120 190 -61 122 stone");h.sendChatCommand("fill 181 -60 120 190 -60 122 pink_carpet");h.sendChatCommand("tp FlightProbe 180.5 -60 121.5");h.sendChatCommand("tp DummyProbeHost 178 -60 118");wait=0;phase=32;return;
                 }

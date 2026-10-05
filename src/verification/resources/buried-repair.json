@@ -1,0 +1,38 @@
+{
+  "source": {
+    "name": "buried passage restoration",
+    "origin": [
+      160,
+      -60,
+      120
+    ],
+    "operations": [
+      {
+        "from": [
+          0,
+          0,
+          0
+        ],
+        "to": [
+          4,
+          0,
+          4
+        ],
+        "block": "minecraft:gold_block"
+      },
+      {
+        "from": [
+          0,
+          1,
+          0
+        ],
+        "to": [
+          4,
+          2,
+          4
+        ],
+        "block": "minecraft:stone"
+      }
+    ]
+  }
+}

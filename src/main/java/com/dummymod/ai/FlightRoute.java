@@ -14,7 +14,7 @@ public final class FlightRoute {
         private final Point start;
         private final Set<Point> goals;
         private final ToIntFunction<Point> enter;
-        private final int limit,radius;
+        private final int limit,radius,maxCost;
         private final PriorityQueue<Node> open=new PriorityQueue<>(Comparator.comparingInt(Node::score).thenComparing(Comparator.comparingInt(Node::cost).reversed()));
         private final Map<Point,Integer> cost=new HashMap<>(),passability=new HashMap<>();
         private final Map<Point,Point> previous=new HashMap<>();
@@ -22,7 +22,11 @@ public final class FlightRoute {
         private boolean done;
         private List<Point> result=List.of();
         public Search(Point start,Collection<Point> goals,ToIntFunction<Point> enter,int limit) {
+            this(start,goals,enter,limit,Integer.MAX_VALUE);
+        }
+        public Search(Point start,Collection<Point> goals,ToIntFunction<Point> enter,int limit,int maxCost) {
             this.start=start;this.goals=Set.copyOf(goals);this.enter=enter;this.limit=limit;
+            this.maxCost=maxCost;
             radius=goals.stream().mapToInt(start::distance).max().orElse(0)+32;
             done=goals.isEmpty();cost.put(start,0);open.add(new Node(start,0,heuristic(start)));
         }
@@ -45,7 +49,7 @@ public final class FlightRoute {
                     Point p=new Point(n.p.x+d[0],n.p.y+d[1],n.p.z+d[2]);
                     if(p.distance(start)>radius || cost.getOrDefault(p,Integer.MAX_VALUE)<=n.cost+1)continue;
                     int step=passability.computeIfAbsent(p,enter::applyAsInt);
-                    if(step<=0 || cost.getOrDefault(p,Integer.MAX_VALUE)<=n.cost+step)continue;
+                    if(step<=0 || n.cost+step>maxCost || cost.getOrDefault(p,Integer.MAX_VALUE)<=n.cost+step)continue;
                     cost.put(p,n.cost+step);previous.put(p,n.p);open.add(new Node(p,n.cost+step,n.cost+step+heuristic(p)));
                 }
             }
