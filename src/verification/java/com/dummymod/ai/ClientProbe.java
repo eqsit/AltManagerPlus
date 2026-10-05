@@ -22,6 +22,7 @@ public final class ClientProbe implements ClientModInitializer {
     private boolean shovelUsed,walkSeen,fastSeen,slowSeen;
     private boolean checkpoint;
     private boolean passageSeen;
+    private boolean carpetWalkSeen;
     private final java.util.Deque<String> interiorReset=new java.util.ArrayDeque<>();
     private int stressTotal;
     private com.google.gson.JsonObject stressDesign;
@@ -39,7 +40,7 @@ public final class ClientProbe implements ClientModInitializer {
                 c.setScreen(new AiConfigScreen(null));
                 if(c.currentScreen.children().size()<8)throw new AssertionError("AI menu widgets missing");
                 log("PASS: AI menu opens with masked API-key input");phase=1;
-                if(System.getProperty("dummymod.probeInterior")!=null){apiDone=true;apiPassed=true;}
+                if(System.getProperty("dummymod.probeInterior")!=null || System.getProperty("dummymod.probeDecoration")!=null){apiDone=true;apiPassed=true;}
                 else CompletableFuture.runAsync(()->{
                     try {var response=OmniClient.ask("You are a Minecraft architect. Reply ONLY JSON {\"reply\":\"Привет!\",\"action\":\"chat\"}. "+"Keep resources negotiable. ".repeat(100),java.util.List.of(new Conversation.Message("user","Привет")));apiPassed=response.has("reply");log("PASS: actual Java OmniRoute client responds");}
                     catch(Exception e){log("FAIL API: "+e.getClass().getSimpleName()+" "+e.getMessage());}
@@ -58,6 +59,7 @@ public final class ClientProbe implements ClientModInitializer {
                 wait=0;creativeSession=DummyManager.spawnDummy("FlightProbe");phase=11;return;
             }
             if(phase==11 && creativeSession!=null && creativeSession.isValid() && ++wait>80) {
+                if(System.getProperty("dummymod.probeDecoration")!=null){prepareDecoration(c);return;}
                 if(System.getProperty("dummymod.probeInterior")!=null){prepareInterior(c);return;}
                 wait=0;origin=creativeSession.player.getBlockPos().add(3,0,0);
                 c.getNetworkHandler().sendChatCommand("fill "+origin.toShortString().replace(",","")+" "+origin.add(2,8,2).toShortString().replace(",","")+" air");
@@ -234,6 +236,39 @@ public final class ClientProbe implements ClientModInitializer {
                 if(!building.temporaryPassage())throw new AssertionError("Temporary opening did not survive executor reload");
                 building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();log("PASS: executor recreated from disk while its passage is open; original wall blocks retained for restoration");wait=0;phase=23;return;
             }
+            if(phase==30) {
+                ++wait;
+                // Teleport first and wait for server chunks before clearing the
+                // fixture. /fill fails if issued while the area is unloaded.
+                if(wait==60 && !Boolean.getBoolean("dummymod.probeDecorationResume"))c.getNetworkHandler().sendChatCommand("fill 158 -60 118 173 -48 133 air");
+                if(wait<=100)return;
+                wait=0;building=new Building(creativeSession,BuildPlan.parse(stressDesign),ClientProbe::log);building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();
+                log("Decoration project: "+building.plan.name+", cells="+building.states.size());phase=31;return;
+            }
+            if(phase==31) {
+                building.tick(true);wait++;
+                if(ticks%100==0)log("Decoration remaining="+building.states.keySet().stream().filter(building::needs).count()+"; "+building.status()+"; "+building.diagnostic());
+                if(building.finished()) {
+                    log("PASS: exact decoration project completed; every declared block and property matches");building.stop();
+                    var h=c.getNetworkHandler();h.sendChatCommand("fill 180 -60 120 192 -52 124 air");h.sendChatCommand("fill 180 -61 120 190 -61 122 stone");h.sendChatCommand("fill 181 -60 120 190 -60 122 pink_carpet");h.sendChatCommand("tp FlightProbe 180.5 -60 121.5");h.sendChatCommand("tp DummyProbeHost 178 -60 118");wait=0;phase=32;return;
+                }
+                if(wait>12000 || building.status().equals("Стройка на паузе"))throw new AssertionError("Decoration stalled: "+building.diagnostic());
+            }
+            if(phase==32 && ++wait>60) {
+                wait=0;var design=JsonParser.parseString("{\"name\":\"carpet walking\",\"origin\":[180,-60,120],\"operations\":[{\"from\":[9,1,1],\"to\":[9,1,1],\"block\":\"minecraft:gold_block\"}]}").getAsJsonObject();
+                building=new Building(creativeSession,BuildPlan.parse(design),ClientProbe::log);building.mode(true,false);building.preferWalking(true);building.flightSpeed(FlightSpeed.FAST);building.start();phase=33;return;
+            }
+            if(phase==33) {
+                building.tick(true);wait++;
+                carpetWalkSeen|=!creativeSession.player.getAbilities().flying && creativeSession.player.getVelocity().horizontalLength()>0.03 && creativeSession.world.getBlockState(creativeSession.player.getBlockPos()).getBlock() instanceof net.minecraft.block.CarpetBlock;
+                if(ticks%100==0)log("Carpet walking: "+building.status()+"; "+building.diagnostic());
+                if(building.finished()) {
+                    if(!carpetWalkSeen)throw new AssertionError("Bot did not walk across a carpet to its build target");
+                    log("PASS: background account steps from bare floor onto carpet and walks across it to build");
+                    Files.writeString(Path.of("build/client-probe-result.txt"),"PASS exact decoration project / every declared block and property / walking onto and across carpet");phase=6;c.scheduleStop();
+                }
+                if(wait>1800 || building.status().equals("Стройка на паузе"))throw new AssertionError("Carpet walking stalled: "+building.diagnostic());
+            }
             if(phase==2 && c.currentScreen instanceof CreateWorldScreen screen) {
                 screen.getWorldCreator().setWorldName("DummyMod integration probe");
                 screen.getWorldCreator().setGameMode(WorldCreator.Mode.SURVIVAL);
@@ -290,5 +325,10 @@ public final class ClientProbe implements ClientModInitializer {
         }
         var h=c.getNetworkHandler();h.sendChatCommand("gamemode creative FlightProbe");h.sendChatCommand("tp FlightProbe 97.5 -32.92 92.15");h.sendChatCommand("tp DummyProbeHost 78 -60 78");
         wait=0;phase=20;
+    }
+    private void prepareDecoration(MinecraftClient c) throws Exception {
+        var saved=JsonParser.parseString(Files.readString(Path.of(System.getProperty("dummymod.probeDecoration")))).getAsJsonObject();
+        stressDesign=saved.getAsJsonObject("source").deepCopy();var coordinates=new com.google.gson.JsonArray();coordinates.add(160);coordinates.add(-60);coordinates.add(120);stressDesign.add("origin",coordinates);
+        var h=c.getNetworkHandler();h.sendChatCommand("gamemode creative FlightProbe");h.sendChatCommand("tp FlightProbe 159 -60 119");h.sendChatCommand("tp DummyProbeHost 157 -60 117");wait=0;phase=30;
     }
 }

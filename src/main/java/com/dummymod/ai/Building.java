@@ -59,14 +59,22 @@ public final class Building {
     BlockPos position(BuildPlan.Cell c){return new BlockPos(plan.origin[0]+c.x(),plan.origin[1]+c.y(),plan.origin[2]+c.z());}
     boolean loaded(BuildPlan.Cell c){BlockPos p=position(c);return session.world.isChunkLoaded(p.getX()>>4,p.getZ()>>4);}
     boolean matches(BuildPlan.Cell c,BlockState current) {
+        return matchesExcept(c,current,null);
+    }
+    private boolean matchesExcept(BuildPlan.Cell c,BlockState current,String except) {
         BlockState desired=states.get(c);
         if(desired.isAir())return current.isAir();
         if(current.getBlock()!=desired.getBlock())return false;
         for(var p:properties.get(c).entrySet()) {
+            if(p.getKey().equals(except))continue;
             Property<?> property=current.getBlock().getStateManager().getProperty(p.getKey());
             if(!propertyValue(current,property).equals(p.getValue()))return false;
         }
         return true;
+    }
+    boolean adjustsLight(BuildPlan.Cell c,BlockState current) {
+        var block=current.getBlock();
+        return (block instanceof CandleBlock || block instanceof CandleCakeBlock || block instanceof CampfireBlock) && properties.get(c).containsKey("lit") && matchesExcept(c,current,"lit") && !matches(c,current);
     }
     private static <T extends Comparable<T>> String propertyValue(BlockState state,Property<T> prop){return prop.name(state.get(prop));}
     boolean needs(BuildPlan.Cell c){return !loaded(c) || flight.awaiting(position(c)) || !matches(c,session.world.getBlockState(position(c)));}
@@ -74,6 +82,7 @@ public final class Building {
         if(!loaded(c))return false;
         BlockState current=session.world.getBlockState(position(c)),desired=states.get(c);
         if(matches(c,current) || current.isAir())return false;
+        if(adjustsLight(c,current))return false;
         // A single slab is completed by placing its second half, without demolishing it.
         if(desired.getBlock()==current.getBlock() && "double".equals(properties.get(c).get("type")))return false;
         return desired.isAir() || !current.isReplaceable();
