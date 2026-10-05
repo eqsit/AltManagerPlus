@@ -194,7 +194,12 @@ public final class DummyManager {
         if (cleanNick.isEmpty()) cleanNick = randomNickname();
         if (cleanNick.length() > 16) cleanNick = cleanNick.substring(0, 16);
         PlayerSession session = new PlayerSession(IDS.getAndIncrement(), cleanNick, false);
-        session.proxy = chooseProxy(); session.connecting = true; session.connectionAttempt = ATTEMPTS.incrementAndGet();
+        session.proxy = chooseProxy();
+        if (session.proxy == null && DummyConfig.getInstance().getProxyDistributionMode() == DummyConfig.ProxyDistributionMode.PROXIES_ONLY) {
+            notifyUser("§c[AltManager+] Нет включённых SOCKS5-прокси. Добавьте прокси в меню.");
+            return null;
+        }
+        session.connecting = true; session.connectionAttempt = ATTEMPTS.incrementAndGet();
         dummySessions.add(session);
         DummyConfig.getInstance().setDummyNick(cleanNick); DummyConfig.getInstance().save();
 
@@ -229,12 +234,21 @@ public final class DummyManager {
     private static DummyConfig.SocksProxy chooseProxy() {
         DummyConfig cfg = DummyConfig.getInstance();
         if (cfg.getProxyDistributionMode() == DummyConfig.ProxyDistributionMode.DIRECT_ONLY) return null;
-        List<DummyConfig.SocksProxy> enabled = cfg.getProxies().stream().filter(p -> p != null && p.enabled && p.host != null && !p.host.isBlank() && p.port > 0).toList();
-        if (enabled.isEmpty()) return null;
-        if (cfg.getProxyDistributionMode() == DummyConfig.ProxyDistributionMode.PROXIES_ONLY)
-            return enabled.get(Math.floorMod(PROXY_CURSOR.getAndIncrement(), enabled.size()));
-        int slot = Math.floorMod(PROXY_CURSOR.getAndIncrement(), enabled.size() + 1);
-        return slot == 0 ? null : enabled.get(slot - 1);
+        List<DummyConfig.SocksProxy> routes = new ArrayList<>(cfg.getProxies().stream().filter(p -> p != null && p.enabled && p.host != null && !p.host.isBlank() && p.port > 0 && p.port <= 65535).toList());
+        if (cfg.getProxyDistributionMode() == DummyConfig.ProxyDistributionMode.ROUND_ROBIN) routes.add(0, null);
+        if (routes.isEmpty()) return null;
+        long[] loads = new long[routes.size()];
+        for (PlayerSession s : dummySessions) {
+            if (!(s.connecting || s.isValid())) continue;
+            for (int i = 0; i < routes.size(); i++) if (sameProxy(s.proxy, routes.get(i))) loads[i]++;
+        }
+        int slot = com.dummymod.dummy.proxy.ProxyBalance.choose(loads, PROXY_CURSOR.getAndIncrement());
+        return routes.get(slot);
+    }
+
+    private static boolean sameProxy(DummyConfig.SocksProxy a, DummyConfig.SocksProxy b) {
+        if (a == null || b == null) return a == b;
+        return Objects.equals(a.host, b.host) && a.port == b.port && Objects.equals(a.username, b.username) && Objects.equals(a.password, b.password);
     }
 
     private static void connectSession(PlayerSession session, String host, InetSocketAddress target, String nick) {
@@ -249,7 +263,7 @@ public final class DummyManager {
             } else {
                 socketTarget = target;
             }
-            ChannelFuture future = ProxyBridge.withContext(session.proxy, host, target.getPort(), () -> {
+            ChannelFuture future = ProxyBridge.withContext(connection, session.proxy, host, target.getPort(), () -> {
                 ChannelFuture f = ClientConnection.connect(socketTarget, NetworkingBackend.remote(nativeTransport), connection);
                 if (!f.awaitUninterruptibly(20, TimeUnit.SECONDS)) throw new IllegalStateException("Connection timeout");
                 return f;
@@ -423,7 +437,7 @@ public final class DummyManager {
 
     private static void clearInactiveInput(PlayerSession session) {
         if (session == null || session.player == null) return;
-        if (!BaritoneBridge.ownsInput(session)) session.player.input = new Input();
+        if (!BaritoneBridge.ownsInput(session) && !session.ai.controlsInput()) session.player.input = new Input();
     }
 
     private static void installForegroundSession(MinecraftClient client, PlayerSession session) {
@@ -438,6 +452,7 @@ public final class DummyManager {
     private static void restoreVisibleChat(PlayerSession s, MinecraftClient c) { if (s != null && s.chatState != null && c.inGameHud != null) c.inGameHud.getChatHud().restoreChatState(s.chatState); }
     private static void syncClientWorld(MinecraftClient client, ClientWorld world, boolean stopSounds) {
         client.world = world; ((MinecraftClientAccessor) client).dummymod$setWorld(world, stopSounds);
+        SoundCompatibility.refresh(client);
         if (client.worldRenderer != null) { client.worldRenderer.reload(); client.worldRenderer.scheduleTerrainUpdate(); }
     }
 
@@ -696,9 +711,10 @@ public final class DummyManager {
     public static void tick(MinecraftClient client) {
         if (client == null || client.player == null || client.world == null) return;
         if (activeSession == mainSession) captureMain(client);
+        for (PlayerSession s : dummySessions) if (s.isValid()) s.ai.tick();
         PlayerSession foreground = activeSession;
         if (foreground != null && foreground.isValid()) {
-            if (!(foreground.player.input instanceof KeyboardInput) && !BaritoneBridge.ownsInput(foreground)) {
+            if (!(foreground.player.input instanceof KeyboardInput) && !BaritoneBridge.isAutomationActive(foreground) && !foreground.ai.controlsInput()) {
                 restoreKeyboardInput(foreground, client);
             }
             // Foreground state may be repaired here, but background work below
@@ -715,11 +731,19 @@ public final class DummyManager {
                 focusForegroundCamera(client, foreground);
             }
             foreground.botController.tick(client);
+            if(foreground.player.age%20==0)SoundCompatibility.refresh(client);
             tickAutoclicker(foreground, client);
             ControlDiagnostics.pollForeground(client, "client-tick-end");
         }
         for (PlayerSession s : getSessions()) {
             if (s != foreground && s.isValid()) tickBackgroundSession(s, client);
+            else if (!s.main && s.connecting && !s.isValid()) {
+                ClientConnection pending = s.activeConnection != null ? s.activeConnection : s.pendingConnection;
+                if (pending != null) {
+                    pending.tick();
+                    if (!pending.isChannelAbsent() && !pending.isOpen()) pending.handleDisconnection();
+                }
+            }
         }
     }
 
@@ -741,7 +765,7 @@ public final class DummyManager {
             }
 
             boolean baritoneActive = BaritoneBridge.isAutomationActive(s);
-            if (s.player != null && !baritoneActive) {
+            if (s.player != null && !baritoneActive && !s.ai.controlsInput()) {
                 // Never carry stale keyboard/Baritone state into an idle
                 // background account.
                 s.player.input = new Input();

@@ -27,6 +27,7 @@ import java.util.WeakHashMap;
  */
 public final class ControlDiagnostics {
     private static final Logger LOGGER = LoggerFactory.getLogger("DummyControlDiag");
+    private static final boolean ENABLED=Boolean.getBoolean("dummymod.controlDiagnostics");
     private static final long REQUESTED_SNAPSHOT_INTERVAL_NANOS = 1_000_000_000L;
     private static final Map<PlayerSession, DiagState> STATES = Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -41,12 +42,14 @@ public final class ControlDiagnostics {
     }
 
     public static void pollForeground(MinecraftClient client, String phase) {
+        if(!ENABLED)return;
         PlayerSession session = DummyManager.getActiveSession();
         if (!isForegroundDummy(session, client, session == null ? null : session.player)) return;
         log(session, client, phase, null, false);
     }
 
     public static void afterMovement(ClientPlayerEntity player, boolean sprintingBefore) {
+        if(!ENABLED)return;
         MinecraftClient client = MinecraftClient.getInstance();
         PlayerSession session = DummyManager.getActiveSession();
         if (!isForegroundDummy(session, client, player)) return;
@@ -64,6 +67,7 @@ public final class ControlDiagnostics {
 
     private static void log(PlayerSession session, MinecraftClient client, String phase,
                             Boolean sprintingBeforeMovement, boolean force) {
+        if(!ENABLED)return;
         if (!isForegroundDummy(session, client, session == null ? null : session.player)) return;
 
         try {

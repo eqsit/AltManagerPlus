@@ -38,6 +38,7 @@ public class PlayerSession {
     public volatile DummyConfig.SocksProxy proxy;
     public final AutoclickerState autoclicker = new AutoclickerState();
     public final BotController botController = new BotController(this);
+    public final com.dummymod.ai.AiController ai = new com.dummymod.ai.AiController(this);
     public volatile IBaritone baritone;
     /** Stable bound context used by this session's Baritone instance. */
     public volatile IBaritoneClientContext baritoneContext;
@@ -88,6 +89,7 @@ public class PlayerSession {
     }
 
     public void clearWorld() {
+        ai.disconnect();
         player = null;
         world = null;
         interactionManager = null;

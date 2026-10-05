@@ -61,7 +61,9 @@ public class ClientConnectionMixin {
             return;
         }
 
-        if (!connection.isOpen()) {
+        // Vanilla queues the initial handshake/login before channelActive.
+        // Cancelling those packets leaves a live TCP socket stuck in LOGIN.
+        if (!connection.isOpen() && !connection.isChannelAbsent()) {
             ci.cancel();
             return;
         }
@@ -80,9 +82,9 @@ public class ClientConnectionMixin {
         }
     }
 
-    @Inject(method = "addHandlers", at = @At("HEAD"))
-    private static void dummymod$injectProxy(ChannelPipeline pipeline, net.minecraft.network.NetworkSide side, boolean local, net.minecraft.network.handler.PacketSizeLogger packetSizeLogger, CallbackInfo ci) {
-        ProxyBridge.inject(pipeline);
+    @Inject(method = "addFlowControlHandler", at = @At("HEAD"))
+    private void dummymod$injectProxy(ChannelPipeline pipeline, CallbackInfo ci) {
+        ProxyBridge.inject(pipeline, (ClientConnection) (Object) this);
     }
 
     private static boolean isPlayPacket(Packet<?> packet) {

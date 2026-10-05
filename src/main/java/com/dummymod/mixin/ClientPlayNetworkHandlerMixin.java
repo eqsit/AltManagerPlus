@@ -29,6 +29,25 @@ import java.util.List;
 
 @Mixin(ClientPlayNetworkHandler.class)
 public class ClientPlayNetworkHandlerMixin {
+    @Inject(method = "onChatMessage", at = @At("TAIL"))
+    private void dummy$aiChat(net.minecraft.network.packet.s2c.play.ChatMessageS2CPacket packet, CallbackInfo ci) {
+        if (!MinecraftClient.getInstance().isOnThread()) return;
+        ClientPlayNetworkHandler handler = (ClientPlayNetworkHandler) (Object) this;
+        var entry = handler.getPlayerListEntry(packet.sender());
+        if (entry != null) com.dummymod.ai.AiChatRouter.receive(entry.getProfile().name(), packet.body().content());
+    }
+
+    @Inject(method = "onProfilelessChatMessage", at = @At("TAIL"))
+    private void dummy$aiProfileless(net.minecraft.network.packet.s2c.play.ProfilelessChatMessageS2CPacket packet, CallbackInfo ci) {
+        if (!MinecraftClient.getInstance().isOnThread()) return;
+        com.dummymod.ai.AiChatRouter.receive(packet.chatType().name().getString(), packet.message().getString());
+    }
+
+    @Inject(method = "onGameMessage", at = @At("TAIL"))
+    private void dummy$aiGame(net.minecraft.network.packet.s2c.play.GameMessageS2CPacket packet, CallbackInfo ci) {
+        if (!MinecraftClient.getInstance().isOnThread() || packet.overlay()) return;
+        com.dummymod.ai.AiChatRouter.formatted(packet.content().getString());
+    }
 
     @Inject(method = "sendChatMessage", at = @At("HEAD"), cancellable = true)
     private void interceptAltManagerHashCommand(String message, CallbackInfo ci) {

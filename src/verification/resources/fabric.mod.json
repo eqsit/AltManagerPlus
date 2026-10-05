@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"dummymod_probe","version":"1","name":"DummyMod verification probe","environment":"client","entrypoints":{"client":["com.dummymod.ai.ClientProbe"]},"depends":{"dummymod":"*"}}

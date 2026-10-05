@@ -27,7 +27,7 @@ public class ProxyConfigScreen extends Screen {
 
         // Mode switch button
         String modeName = switch (cfg.getProxyDistributionMode()) {
-            case ROUND_ROBIN -> "Равномерно (Direct + SOCKS5)";
+            case ROUND_ROBIN -> "По нагрузке (Direct + SOCKS5)";
             case PROXIES_ONLY -> "Только SOCKS5 прокси";
             case DIRECT_ONLY -> "Только прямое (Direct)";
         };
@@ -101,7 +101,6 @@ public class ProxyConfigScreen extends Screen {
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        renderBackground(context, mouseX, mouseY, delta);
         context.drawCenteredTextWithShadow(textRenderer, title, width / 2, 12, 0xFFFFFF);
         super.render(context, mouseX, mouseY, delta);
     }

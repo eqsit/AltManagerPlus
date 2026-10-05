@@ -70,6 +70,9 @@ dependencies {
     // The runtime remains a separate required mod JAR; it is deliberately not nested in DummyMod.
     modCompileOnly files(baritoneApiJar)
     modRuntimeOnly files(baritoneRuntimeJar)
+    // Loom's development classpath does not unpack nested JARs in local mod
+    // artifacts. Expose Baritone's bundled native pathfinder to dev launches.
+    runtimeOnly files(zipTree(baritoneRuntimeJar).matching { include 'META-INF/jars/*.jar' })
 }
 
 processResources {
@@ -87,4 +90,22 @@ tasks.withType(JavaCompile).configureEach {
 java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
+}
+
+sourceSets {
+    verification {
+        compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+        runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+    }
+}
+tasks.register('verifyAi', JavaExec) {
+    dependsOn verificationClasses
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'com.dummymod.ai.RegressionChecks'
+}
+check.dependsOn verifyAi
+tasks.register('clientProbeJar', Jar) {
+    dependsOn verificationClasses
+    archiveFileName = 'dummymod-client-probe.jar'
+    from sourceSets.verification.output
 }

@@ -20,9 +20,13 @@
     "ClientPlayerEntityAccessor",
     "ClientPlayerEntitySprintDiagnostics",
     "ClientPlayerInteractionManagerMixin",
+    "ClientWorldMixin",
+    "ClientWorldPredictionAccessor",
+    "PendingUpdateManagerAccessor",
     "WorldRendererMixin",
     "ParticleMixin",
-    "ParticleManagerMixin"
+    "ParticleManagerMixin",
+    "SoundPhysicsMixin"
   ],
   "injectors": {
     "defaultRequire": 1

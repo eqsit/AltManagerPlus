@@ -78,6 +78,9 @@ public class AltManagerScreen extends Screen {
             }).dimensions(curX, topY, btnW5, btnHeight).build());
         }
 
+        addDrawableChild(ButtonWidget.builder(Text.literal("ИИ / OmniRoute"), b -> {
+            if (client != null) client.setScreen(new AiConfigScreen(this));
+        }).dimensions(16, height - 26, 140, 20).build());
         rebuildCards();
     }
 
@@ -167,8 +170,6 @@ public class AltManagerScreen extends Screen {
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        renderBackground(context, mouseX, mouseY, delta);
-
         List<PlayerSession> sessions = DummyManager.getSessions();
         int cardHeight = 56;
         int startY = 48 - scrollOffset;
@@ -234,9 +235,10 @@ public class AltManagerScreen extends Screen {
                 );
             }
 
-            Text proxyLine = Text.empty()
+            var proxyLine = Text.empty()
                     .append(Text.literal("Прокси: ").formatted(Formatting.GRAY))
                     .append(Text.literal(s.proxyLabel()).formatted(Formatting.AQUA));
+            if (!s.main) proxyLine.append(Text.literal("   " + s.ai.status() + "  [" + s.ai.historySize() + "/300]").formatted(Formatting.GRAY));
             context.drawTextWithShadow(textRenderer, proxyLine, 24, y + 37, 0xAAAAAA);
         }
     }

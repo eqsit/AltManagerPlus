@@ -4,32 +4,36 @@ import com.dummymod.config.DummyConfig;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelDuplexHandler;
+import io.netty.channel.ChannelPromise;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.ArrayDeque;
 
 public final class ProxyBridge {
     private static final Logger LOGGER = LoggerFactory.getLogger("DummyMod-Proxy");
-    private static volatile Context activeContext;
+    private static final java.util.concurrent.ConcurrentHashMap<net.minecraft.network.ClientConnection, Context> CONTEXTS = new java.util.concurrent.ConcurrentHashMap<>();
 
     public record Context(DummyConfig.SocksProxy proxy, String targetHost, int targetPort) {}
 
     private ProxyBridge() {}
 
-    public static synchronized <T> T withContext(DummyConfig.SocksProxy proxy, String targetHost, int targetPort, java.util.concurrent.Callable<T> action) throws Exception {
-        activeContext = new Context(proxy, targetHost, targetPort);
+    public static <T> T withContext(net.minecraft.network.ClientConnection connection, DummyConfig.SocksProxy proxy, String targetHost, int targetPort, java.util.concurrent.Callable<T> action) throws Exception {
+        CONTEXTS.put(connection, new Context(proxy, targetHost, targetPort));
         try {
             return action.call();
         } finally {
-            activeContext = null;
+            CONTEXTS.remove(connection);
         }
     }
 
-    public static void inject(ChannelPipeline pipeline) {
-        Context ctx = activeContext;
+    public static void inject(ChannelPipeline pipeline, net.minecraft.network.ClientConnection connection) {
+        Context ctx = CONTEXTS.get(connection);
         if (ctx == null || ctx.proxy == null || !ctx.proxy.enabled || ctx.proxy.host == null || ctx.proxy.host.isBlank()) {
             return;
         }
@@ -39,6 +43,7 @@ public final class ProxyBridge {
     }
 
     public static class Socks5ClientHandler extends ByteToMessageDecoder {
+        private final TunnelWrites writes = new TunnelWrites();
         private enum State {
             INIT,
             AUTH_RESPONSE,
@@ -59,9 +64,29 @@ public final class ProxyBridge {
         }
 
         @Override
+        public void handlerAdded(ChannelHandlerContext ctx) {
+            // Minecraft begins sending its login as soon as TCP connects. Keep
+            // those bytes queued until SOCKS has accepted CONNECT.
+            ctx.pipeline().addAfter(ctx.name(), ctx.name() + "-pending", writes);
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable error) {
+            writes.fail(error);
+            ctx.close();
+        }
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            writes.fail(new java.io.IOException("SOCKS5 tunnel closed before login"));
+            super.channelInactive(ctx);
+        }
+
+        @Override
         public void channelActive(ChannelHandlerContext ctx) throws Exception {
             super.channelActive(ctx);
             sendGreeting(ctx);
+            ctx.executor().schedule(() -> { if (state != State.DONE) ctx.close(); }, 20, java.util.concurrent.TimeUnit.SECONDS);
         }
 
         private void sendGreeting(ChannelHandlerContext ctx) {
@@ -83,6 +108,7 @@ public final class ProxyBridge {
         private void sendAuth(ChannelHandlerContext ctx) {
             byte[] userBytes = (proxy.username == null ? "" : proxy.username).getBytes(StandardCharsets.UTF_8);
             byte[] passBytes = (proxy.password == null ? "" : proxy.password).getBytes(StandardCharsets.UTF_8);
+            if (userBytes.length > 255 || passBytes.length > 255) throw new IllegalArgumentException("SOCKS5 credentials exceed 255 bytes");
             ByteBuf buf = ctx.alloc().buffer();
             buf.writeByte(0x01); // Subnegotiation version 1
             buf.writeByte(userBytes.length);
@@ -95,6 +121,7 @@ public final class ProxyBridge {
 
         private void sendConnect(ChannelHandlerContext ctx) {
             byte[] hostBytes = targetHost.getBytes(StandardCharsets.UTF_8);
+            if (hostBytes.length == 0 || hostBytes.length > 255) throw new IllegalArgumentException("Invalid SOCKS5 target hostname length");
             ByteBuf buf = ctx.alloc().buffer();
             buf.writeByte(0x05); // SOCKS5
             buf.writeByte(0x01); // CMD: CONNECT
@@ -138,6 +165,7 @@ public final class ProxyBridge {
                 byte rep = in.readByte();
                 byte rsv = in.readByte();
                 byte atyp = in.readByte();
+                if (version != 0x05 || rsv != 0x00) throw new IllegalStateException("Invalid SOCKS5 CONNECT response");
 
                 int needed;
                 if (atyp == 0x01) {
@@ -166,9 +194,37 @@ public final class ProxyBridge {
                 }
 
                 state = State.DONE;
+                writes.ready();
                 ctx.pipeline().remove(this);
                 LOGGER.info("[DummyMod-Proxy] SOCKS5 tunnel established successfully to {}:{}", targetHost, targetPort);
             }
+        }
+    }
+
+    private static final class TunnelWrites extends ChannelDuplexHandler {
+        private record Pending(Object message, ChannelPromise promise) {}
+        private final ArrayDeque<Pending> pending = new ArrayDeque<>();
+        private ChannelHandlerContext context;
+        private boolean connected;
+        @Override public void handlerAdded(ChannelHandlerContext ctx) { context = ctx; }
+        @Override public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+            if (connected) { ctx.write(msg, promise); return; }
+            if (pending.size() >= 256) {
+                ReferenceCountUtil.release(msg); promise.setFailure(new java.io.IOException("SOCKS5 login queue full")); ctx.close(); return;
+            }
+            pending.addLast(new Pending(msg, promise));
+        }
+        @Override public void flush(ChannelHandlerContext ctx) { if (connected) ctx.flush(); }
+        void ready() {
+            connected = true;
+            while (!pending.isEmpty()) { Pending p = pending.removeFirst(); context.write(p.message, p.promise); }
+            context.flush();context.pipeline().remove(this);
+        }
+        void fail(Throwable error) {
+            while (!pending.isEmpty()) { Pending p = pending.removeFirst();ReferenceCountUtil.release(p.message);p.promise.tryFailure(error); }
+        }
+        @Override public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            fail(new java.io.IOException("SOCKS5 tunnel closed"));super.channelInactive(ctx);
         }
     }
 }

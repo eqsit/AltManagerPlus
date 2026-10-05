@@ -157,6 +157,11 @@ public class ClientCommonNetworkHandlerMixin {
         if (DummyManager.isDummyConnection(connection)) {
             ci.cancel();
 
+            var session=DummyManager.getSession(connection);
+            String diagnostic=info.reason()==null?"disconnected":info.reason().getString().replaceAll("[\\p{Cntrl}§]"," ");
+            String key=com.dummymod.ai.AiConnection.get().apiKey;if(key!=null && !key.isEmpty())diagnostic=diagnostic.replace(key,"[hidden]");
+            org.slf4j.LoggerFactory.getLogger("DummyMod").warn("Dummy {} disconnected: {}",session==null?"unknown":session.displayName(),diagnostic.substring(0,Math.min(diagnostic.length(),300)));
+
             if (DummyManager.consumeExpectedDisconnect(connection)) {
                 return;
             }

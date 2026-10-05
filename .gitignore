@@ -5,3 +5,21 @@ run/
 *.log
 .idea/
 *.iml
+
+# Local game state and diagnostics can contain credentials or private chat.
+/logs/
+*.log.gz
+/config/
+/backups/
+/screenshots/
+dummymod-ai.json
+dummymod.json
+dummymod-ai-history/
+dummymod-ai-saved-projects/
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks

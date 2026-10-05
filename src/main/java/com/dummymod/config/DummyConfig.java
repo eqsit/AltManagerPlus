@@ -40,6 +40,12 @@ public class DummyConfig {
     private String dummyNick = "DummyPlayer";
     private ProxyDistributionMode proxyDistributionMode = ProxyDistributionMode.ROUND_ROBIN;
     private List<SocksProxy> proxies = new ArrayList<>();
+    public boolean aiEnabled = true;
+    public String aiChatWhitelist = "";
+    public boolean aiAllowBreaking = true;
+    public boolean aiServerFormattedChat = true;
+    public com.dummymod.ai.FlightSpeed aiCreativeFlightSpeed=com.dummymod.ai.FlightSpeed.AUTO;
+    public boolean aiPreferWalking=true;
 
     public static DummyConfig getInstance() {
         if (INSTANCE == null) load();
@@ -57,6 +63,7 @@ public class DummyConfig {
         if (INSTANCE == null) INSTANCE = new DummyConfig();
         if (INSTANCE.proxies == null) INSTANCE.proxies = new ArrayList<>();
         if (INSTANCE.proxyDistributionMode == null) INSTANCE.proxyDistributionMode = ProxyDistributionMode.ROUND_ROBIN;
+        if (INSTANCE.aiCreativeFlightSpeed == null) INSTANCE.aiCreativeFlightSpeed=com.dummymod.ai.FlightSpeed.AUTO;
         INSTANCE.save();
     }
 
