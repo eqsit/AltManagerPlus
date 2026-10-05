@@ -76,6 +76,12 @@ public final class Building {
         var block=current.getBlock();
         return (block instanceof CandleBlock || block instanceof CandleCakeBlock || block instanceof CampfireBlock) && properties.get(c).containsKey("lit") && matchesExcept(c,current,"lit") && !matches(c,current);
     }
+    boolean placementMatches(BuildPlan.Cell c,BlockState predicted) {
+        if(predicted==null)return false;
+        if(matches(c,predicted) || adjustsLight(c,predicted))return true;
+        // The first half of a double slab is an intentional intermediate state.
+        return predicted.getBlock() instanceof SlabBlock && "double".equals(properties.get(c).get("type")) && matchesExcept(c,predicted,"type");
+    }
     private static <T extends Comparable<T>> String propertyValue(BlockState state,Property<T> prop){return prop.name(state.get(prop));}
     boolean needs(BuildPlan.Cell c){return !loaded(c) || flight.awaiting(position(c)) || !matches(c,session.world.getBlockState(position(c)));}
     boolean obstructed(BuildPlan.Cell c) {
@@ -152,6 +158,12 @@ public final class Building {
         }
         settleChecks=0;
         IBaritone b=BaritoneBridge.resolve(session);if(b==null){pause();say.accept("Baritone недоступен для этой дамми.");return;}
+        // A server update or another player may add an obstruction after the
+        // placement batch was selected. Re-enter clearing before it seals access
+        // to a lower cell; waiting for this unfinished batch would never do so.
+        if(creative() && !clearing && remaining.stream().anyMatch(this::obstructed)) {
+            running=false;stage=Map.of();flight.retry();b.getBuilderProcess().onLostControl();b.getPathingBehavior().cancelEverything();
+        }
         if(!stage.isEmpty() && stage.keySet().stream().noneMatch(this::stagePending)) {
             running=false;flight.retry();b.getBuilderProcess().onLostControl();b.getPathingBehavior().cancelEverything();stage=Map.of();
         }
@@ -246,8 +258,8 @@ public final class Building {
         Vec3d now=new Vec3d(session.player.getX(),session.player.getY(),session.player.getZ());boolean moving=lastPosition!=null && now.squaredDistanceTo(lastPosition)>0.04;lastPosition=now;
         // Removing terrain is progress even when the replacement block is not placed yet.
         int work=remaining.size()+(creative?(int)remaining.stream().filter(this::obstructed).count():0)+(flight.repairing()?1:0);
-        if(!watch.observe(work,moving,creative && flight.planning(),20))return false;
-        if(!watch.recover()) {String point=creative?flight.diagnostic():position(remaining.getFirst()).toShortString();pause();say.accept("Не удалось "+(clearing?"расчистить":"поставить блок на")+" этот участок: "+point+". Проверь доступ к блокам и защиту территории. Проект сохранён; напиши «продолжай».");return true;}
+        if(!watch.observe(work,moving,false,20,creative && flight.planning()))return false;
+        if(!watch.recover()) {String point=creative?flight.problem():position(remaining.getFirst()).toShortString();org.slf4j.LoggerFactory.getLogger("DummyMod-AI").warn("Builder paused after retries, remaining={}, details={}",remaining.size(),creative?flight.diagnostic():point);pause();say.accept("Не удалось "+(clearing?"расчистить":"поставить блок на")+" этот участок: "+point+" Проект сохранён; напиши «продолжай».");return true;}
         org.slf4j.LoggerFactory.getLogger("DummyMod-AI").info("Recovering builder for {}, remaining={}, attempt={}, creative={}, clearing={}, target={}",session.displayName(),remaining.size(),watch.retries(),creative,clearing,creative?flight.diagnostic():position(remaining.getFirst()).toShortString());
         if(watch.retries()==1)say.accept("Застряла на этом участке. Меняю подход и продолжаю сама.");
         if(creative){flight.retry();return true;}

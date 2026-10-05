@@ -16,6 +16,7 @@
     "MinecraftClientAccessor",
     "KeyBindingAccessor",
     "EntityAccessor",
+    "BlockItemPlacementAccessor",
     "ClientPlayerEntityMixin",
     "ClientPlayerEntityAccessor",
     "ClientPlayerEntitySprintDiagnostics",

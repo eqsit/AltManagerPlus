@@ -240,7 +240,13 @@ public final class ClientProbe implements ClientModInitializer {
                 ++wait;
                 // Teleport first and wait for server chunks before clearing the
                 // fixture. /fill fails if issued while the area is unloaded.
-                if(wait==60 && !Boolean.getBoolean("dummymod.probeDecorationResume"))c.getNetworkHandler().sendChatCommand("fill 158 -60 118 173 -48 133 air");
+                if(wait==60 && !Boolean.getBoolean("dummymod.probeDecorationResume")) {
+                    var dimensions=BuildPlan.parse(stressDesign);
+                    c.getNetworkHandler().sendChatCommand("fill 158 -60 118 "+(161+dimensions.width)+" "+Math.max(-48,-59+dimensions.height)+" "+(121+dimensions.length)+" air");
+                }
+                if(wait==70 && System.getProperty("dummymod.probeSeed")!=null) {
+                    for(var command:JsonParser.parseString(Files.readString(Path.of(System.getProperty("dummymod.probeSeed")))).getAsJsonArray())c.getNetworkHandler().sendChatCommand(command.getAsString());
+                }
                 if(wait<=100)return;
                 wait=0;building=new Building(creativeSession,BuildPlan.parse(stressDesign),ClientProbe::log);building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();
                 log("Decoration project: "+building.plan.name+", cells="+building.states.size());phase=31;return;

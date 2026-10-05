@@ -25,10 +25,17 @@ final class CreativeBuilder {
     private FlightSpeed speed=FlightSpeed.AUTO;
     private String lastTarget="нет доступной точки";
     private String lastInteraction="none",lastGate="none";
+    private String lastStates="none";
     private BlockPos awaitingConfirmation;
     private boolean awaitingBreak;
     private int rejectedActions;
     private Vec3d rejectedPose;
+    private BlockHitResult actionHit;
+    private BlockPos actionTarget;
+    private BlockState actionSupport;
+    private BlockPos turnTarget;
+    private float turnYaw,turnPitch;
+    private int turnStarted;
     private FlightRoute.Search search;
     private FlightRoute.Point routeStart;
     private List<FlightRoute.Point> routeGoals=List.of();
@@ -39,6 +46,7 @@ final class CreativeBuilder {
     private BlockState navigationExpected;
     private final Map<BuildPlan.Cell,Integer> postponed=new HashMap<>();
     private final Map<FlightRoute.Point,Integer> failedVantages=new HashMap<>();
+    private final Map<String,Integer> failedAnchors=new HashMap<>();
     CreativeBuilder(PlayerSession session,Building building){
         this.session=session;this.building=building;
         var client=net.minecraft.client.MinecraftClient.getInstance();
@@ -55,10 +63,11 @@ final class CreativeBuilder {
     static boolean available(PlayerSession s){return s.player!=null && s.player.isCreative() && s.player.getAbilities().allowFlying;}
     void release() {
         if(controlling && session.player!=null){session.player.setVelocity(Vec3d.ZERO);session.player.input=new Input();session.player.setSprinting(false);}
-        controlling=false;target=null;path=List.of();search=null;awaitingConfirmation=null;navigationAction=null;
+        controlling=false;target=null;turnTarget=null;path=List.of();search=null;awaitingConfirmation=null;navigationAction=null;
     }
-    void retry(){target=null;path=List.of();search=null;postponed.clear();failedVantages.clear();failedRoutes=0;}
-    String diagnostic(){return lastTarget+", position="+new Vec3d(session.player.getX(),session.player.getY(),session.player.getZ())+", route="+path.size()+", search="+(search==null?"none":routeMode+":"+search.visited())+", repairs="+passage.entries().size()+", travel="+(walking?"walk":"fly")+", gate="+lastGate+", interaction="+lastInteraction;}
+    void retry(){target=null;actionHit=null;turnTarget=null;path=List.of();search=null;postponed.clear();failedVantages.clear();failedRoutes=0;}
+    String diagnostic(){return lastTarget+", position="+new Vec3d(session.player.getX(),session.player.getY(),session.player.getZ())+", route="+path.size()+", search="+(search==null?"none":routeMode+":"+search.visited())+", repairs="+passage.entries().size()+", travel="+(walking?"walk":"fly")+", gate="+lastGate+", interaction="+lastInteraction+", states="+lastStates;}
+    String problem(){return lastTarget+". "+(lastInteraction.contains("свойства блока")?"Не найден способ поставить блок с заданными свойствами.":lastGate.contains("visible=false")?"Не найден доступ к грани блока.":lastGate.contains("подход")?"Не найден маршрут к точке установки.":"Действие не завершилось.");}
     private boolean pending(BuildPlan.Cell c){return clearing?building.obstructed(c):building.needs(c);}
     boolean awaiting(BlockPos pos) {
         if(!pos.equals(awaitingConfirmation))return false;
@@ -107,31 +116,50 @@ final class CreativeBuilder {
                 if(layer==null)layer=c.y();eligible.add(c);
             }
             target=eligible.stream().min(Comparator.comparingDouble(c->session.player.squaredDistanceTo(Vec3d.ofCenter(building.position(c))))).orElse(null);
+            actionHit=null;
             if(target==null){if(!clearing)buildAnchor(stage);return;}
             lastRoute=ticks-40;failedRoutes=0;failedVantages.clear();
             rejectedActions=0;rejectedPose=null;
         }
         BlockPos pos=building.position(target);BlockState desired=building.states.get(target),current=session.world.getBlockState(pos);
+        lastStates="expected="+desired+" actual="+current+" required="+building.properties.get(target);
         boolean adjusting=building.adjustsLight(target,current);
         boolean combine=desired.getBlock()==current.getBlock() && "double".equals(building.properties.get(target).get("type"));
         boolean breaking=clearing || desired.isAir() || (!adjusting && !combine && !current.isReplaceable() && !building.matches(target,current));
-        lastTarget=building.position(target).toShortString()+", "+net.minecraft.registry.Registries.BLOCK.getId(current.getBlock())+", "+(breaking?"ломание":adjusting?"изменение огня":"установка");
+        lastTarget=building.position(target).toShortString()+", "+net.minecraft.registry.Registries.BLOCK.getId((breaking?current:desired).getBlock())+", "+(breaking?"ломание":adjusting?"изменение огня":"установка");
         if(breaking && !allowBreaking){release();return;}
         double slabTop=combine?current.getOutlineShape(session.world,pos).getBoundingBox().maxY:1;
-        BlockHitResult hit=breaking || adjusting?breakHit(pos):combine?new BlockHitResult(new Vec3d(pos.getX()+0.5,pos.getY()+slabTop-0.001,pos.getZ()+0.5),Direction.UP,pos,false):anchor(target,desired);
+        BlockHitResult hit=breaking || adjusting?breakHit(pos):combine?new BlockHitResult(new Vec3d(pos.getX()+0.5,pos.getY()+slabTop-0.001,pos.getZ()+0.5),Direction.UP,pos,false):placementAnchor(pos,desired);
         if(hit==null){postpone();return;}
         double reach=Math.min(session.player.getBlockInteractionRange(),4.5)-0.2;
         Vec3d eye=session.player.getEyePos();
         boolean bodyBlocksPlacement=!breaking && !adjusting && intersects(desired,pos,session.player.getBoundingBox());
         boolean inReach=eye.squaredDistanceTo(hit.getPos())<=reach*reach,canSee=visible(eye,hit);
         lastGate="body="+bodyBlocksPlacement+" reach="+inReach+" visible="+canSee+" support="+hit.getBlockPos().toShortString()+" side="+hit.getSide()+" hit="+hit.getPos();
+        if(!canSee && inReach && allowPassage) {
+            List<BlockPos> opening=sightOpening(eye,hit);
+            if(opening!=null && !opening.isEmpty()) {
+                BlockPos obstruction=opening.getFirst();BlockHitResult removal=breakHit(obstruction);
+                if(usable(removal) && passage.entries().stream().filter(e->!original(e).isAir()).count()<6) {
+                    var entry=new PassageJournal.Entry(obstruction.getX(),obstruction.getY(),obstruction.getZ(),net.minecraft.registry.Registries.BLOCK.getId(session.world.getBlockState(obstruction).getBlock()).toString());
+                    navigationInteract(entry,removal,false);return;
+                }
+            }
+        }
         if(!bodyBlocksPlacement && inReach && canSee && (rejectedPose==null || eye.squaredDistanceTo(rejectedPose)>0.25)) {
             path=List.of();search=null;
-            if(breaking)look(hit.getPos());
+            if(breaking){turnTarget=null;look(hit.getPos());}
             else if(adjusting) {
                 boolean light=desired.get(net.minecraft.state.property.Properties.LIT);
                 equip(light?net.minecraft.item.Items.FLINT_AND_STEEL:current.getBlock() instanceof net.minecraft.block.CampfireBlock?net.minecraft.item.Items.IRON_SHOVEL:net.minecraft.item.Items.AIR);look(hit.getPos());
-            } else {equip(desired);placementLook(hit,desired);}
+            } else {
+                equip(desired);
+                if(!placementLook(hit,desired)) {
+                    lastInteraction="свойства блока не совпадают до установки";failedAnchors.put(anchorKey(pos,hit),ticks+120);
+                    actionHit=null;turnTarget=null;path=List.of();search=null;lastRoute=ticks-40;return;
+                }
+                if(!placementTurnReady(pos)){lastGate="ожидаю поворот головы на сервере";return;}
+            }
             if(preferWalking && supported(session.player.getBoundingBox()))flying(false);
             if(ticks-lastAction<(breaking?5:1))return;
             lastAction=ticks;
@@ -171,9 +199,24 @@ final class CreativeBuilder {
     private BlockHitResult anchor(BuildPlan.Cell cell,BlockState desired) {
         return anchor(building.position(cell),desired,building.properties.get(cell));
     }
+    private BlockHitResult placementAnchor(BlockPos pos,BlockState desired) {
+        // The route and interaction must use the same face. Choosing the nearest
+        // anchor again while moving makes the goal jump to the opposite side.
+        if(actionHit!=null && pos.equals(actionTarget) && session.world.getBlockState(actionHit.getBlockPos()).equals(actionSupport) && failedAnchors.getOrDefault(anchorKey(pos,actionHit),0)<=ticks)return actionHit;
+        actionHit=anchor(target,desired);actionTarget=pos;
+        actionSupport=actionHit==null?null:session.world.getBlockState(actionHit.getBlockPos());
+        return actionHit;
+    }
     private BlockHitResult anchor(BlockPos target,BlockState desired,Map<String,String> props) {
         if(!desired.canPlaceAt(session.world,target))return null;
         BlockHitResult best=null;double distance=Double.MAX_VALUE;boolean bestVisible=false;
+        // Grass and other replaceable plants are clicked in their own cell.
+        // Clicking a different support can otherwise put the block elsewhere.
+        BlockState occupying=session.world.getBlockState(target);
+        if(!occupying.isAir() && occupying.isReplaceable() && !occupying.getOutlineShape(session.world,target).isEmpty()) {
+            BlockHitResult direct=breakHit(target);
+            if(failedAnchors.getOrDefault(anchorKey(target,direct),0)<=ticks){best=direct;distance=session.player.getEyePos().squaredDistanceTo(direct.getPos());bestVisible=visible(session.player.getEyePos(),direct);}
+        }
         for(Direction side:Direction.values()) {
             BlockPos support=target.offset(side.getOpposite());BlockState state=session.world.getBlockState(support);
             if(state.isAir() || state.isReplaceable() || state.getCollisionShape(session.world,support).isEmpty())continue;
@@ -198,6 +241,7 @@ final class CreativeBuilder {
             }
             double d=session.player.getEyePos().squaredDistanceTo(point);
             BlockHitResult candidate=new BlockHitResult(point,side,support,false);
+            if(failedAnchors.getOrDefault(anchorKey(target,candidate),0)>ticks)continue;
             boolean sees=visible(session.player.getEyePos(),candidate);
             if(best==null || sees && !bestVisible || sees==bestVisible && d<distance){best=candidate;distance=d;bestVisible=sees;}
         }
@@ -237,6 +281,26 @@ final class CreativeBuilder {
         BlockHitResult ray=session.world.raycast(new RaycastContext(eye,end,solid?RaycastContext.ShapeType.COLLIDER:RaycastContext.ShapeType.OUTLINE,RaycastContext.FluidHandling.NONE,session.player));
         return ray.getType()==HitResult.Type.BLOCK && ray.getBlockPos().equals(hit.getBlockPos()) && ray.getSide()==hit.getSide();
     }
+    private static String anchorKey(BlockPos target,BlockHitResult hit){return target.asLong()+":"+hit.getBlockPos().asLong()+":"+hit.getSide();}
+    /** A virtual view through at most six restorable cubes, without changing the world. */
+    private List<BlockPos> sightOpening(Vec3d eye,BlockHitResult hit) {
+        Vec3d end=hit.getPos().add(Vec3d.of(hit.getSide().getVector()).multiply(-0.015));
+        Vec3d direction=end.subtract(eye).normalize(),start=eye;
+        List<BlockPos> opening=new ArrayList<>();
+        boolean solid=!session.world.getBlockState(hit.getBlockPos()).getCollisionShape(session.world,hit.getBlockPos()).isEmpty();
+        for(int i=0;i<=6;i++) {
+            BlockHitResult ray=session.world.raycast(new RaycastContext(start,end,solid?RaycastContext.ShapeType.COLLIDER:RaycastContext.ShapeType.OUTLINE,RaycastContext.FluidHandling.NONE,session.player));
+            if(ray.getType()!=HitResult.Type.BLOCK)return null;
+            if(ray.getBlockPos().equals(hit.getBlockPos()))return ray.getSide()==hit.getSide()?opening:null;
+            BlockPos obstacle=ray.getBlockPos();
+            if(!removable(obstacle) || opening.contains(obstacle) || opening.size()>=6)return null;
+            opening.add(obstacle.toImmutable());
+            var exit=new Box(obstacle).raycast(end,start);
+            if(exit.isEmpty())return null;
+            start=exit.get().add(direction.multiply(0.015));
+        }
+        return null;
+    }
     private boolean free(FlightRoute.Point p) {
         if(p.y()<session.world.getBottomY() || p.y()+2>session.world.getTopYInclusive() || !session.world.isChunkLoaded(p.x()>>4,p.z()>>4))return false;
         return session.world.isSpaceEmpty(session.player,body(p));
@@ -265,11 +329,11 @@ final class CreativeBuilder {
     private boolean removable(BlockPos pos) {
         BlockState state=session.world.getBlockState(pos);
         var relative=new BuildPlan.Cell(pos.getX()-building.plan.origin[0],pos.getY()-building.plan.origin[1],pos.getZ()-building.plan.origin[2]);
-        if(building.states.containsKey(relative) || state.hasBlockEntity() || !state.getEntries().isEmpty() || state.getBlock().asItem()==net.minecraft.item.Items.AIR || state.getHardness(session.world,pos)<0 || !state.isFullCube(session.world,pos) || !state.getFluidState().isEmpty())return false;
+        if(building.states.containsKey(relative) && !building.matches(relative,state) || target!=null && building.position(target).equals(pos) || state.hasBlockEntity() || !state.getEntries().isEmpty() || state.getBlock().asItem()==net.minecraft.item.Items.AIR || state.getHardness(session.world,pos)<0 || !state.isFullCube(session.world,pos) || !state.getFluidState().isEmpty())return false;
         // Never remove a container, a fluid barrier, or support for a fragile decoration.
         for(Direction d:Direction.values()) {
             BlockPos adjacent=pos.offset(d);BlockState neighbor=session.world.getBlockState(adjacent);
-            if(!neighbor.getFluidState().isEmpty() || neighbor.getBlock() instanceof net.minecraft.block.FallingBlock || neighbor.getBlock() instanceof net.minecraft.block.TorchBlock || neighbor.getBlock() instanceof net.minecraft.block.WallTorchBlock || neighbor.getBlock() instanceof net.minecraft.block.LanternBlock || neighbor.getBlock() instanceof net.minecraft.block.DoorBlock || neighbor.getBlock() instanceof net.minecraft.block.BedBlock || neighbor.hasBlockEntity())return false;
+            if(!neighbor.getFluidState().isEmpty() || neighbor.getBlock() instanceof net.minecraft.block.FallingBlock || d==Direction.UP && neighbor.getBlock() instanceof net.minecraft.block.PlantBlock && !neighbor.isReplaceable() || neighbor.getBlock() instanceof net.minecraft.block.CarpetBlock || neighbor.getBlock() instanceof net.minecraft.block.AbstractCandleBlock || neighbor.getBlock() instanceof net.minecraft.block.TorchBlock || neighbor.getBlock() instanceof net.minecraft.block.WallTorchBlock || neighbor.getBlock() instanceof net.minecraft.block.LanternBlock || neighbor.getBlock() instanceof net.minecraft.block.DoorBlock || neighbor.getBlock() instanceof net.minecraft.block.BedBlock || neighbor.hasBlockEntity())return false;
         }
         return true;
     }
@@ -337,6 +401,9 @@ final class CreativeBuilder {
                 continue;
             }
             if(!session.world.getBlockState(pos).isReplaceable()){building.navigationFailure("Временный проход изменился: "+pos.toShortString()+". Сохранённые блоки оставлены для восстановления.");return true;}
+            // Keep the approach and its line of sight open until this target is
+            // done. Restoring on the very next tick closes freshly opened access.
+            if(!onlyRepairs && target!=null && pending(target))continue;
             if(session.player.getBoundingBox().expand(0.2).intersects(new Box(pos)) || path.stream().anyMatch(p->body(p).intersects(new Box(pos))))continue;
             BlockHitResult hit=anchor(pos,original(e),Map.of());
             if(usable(hit)){navigationInteract(e,hit,true);return true;}
@@ -396,12 +463,13 @@ final class CreativeBuilder {
             path=search.result();search=null;
             if(path.isEmpty() && routeMode<2) {
                 if(routeMode==0)beginSearch(1);
-                else if(allowPassage && passage.entries().stream().allMatch(e->original(e).isAir()))beginSearch(2);
+                else if(allowPassage)beginSearch(2);
                 if(search!=null)return;
             }
             if(!path.isEmpty()) {
                 if(routeMode==2) {
                     Set<BlockPos> opening=new HashSet<>();path.forEach(p->opening.addAll(blockers(p)));
+                    passage.entries().stream().filter(e->!original(e).isAir()).forEach(e->opening.add(position(e)));
                     if(opening.size()>6){path=List.of();lastGate="проход требует слишком много блоков";}
                 }
                 walking=routeMode==0;
@@ -412,7 +480,7 @@ final class CreativeBuilder {
                     }
                 }
             }
-            if(path.isEmpty() && ++failedRoutes>=3){postpone();return;}
+            if(path.isEmpty() && ++failedRoutes>=3){failedAnchors.put(anchorKey(pos,hit),ticks+400);postpone();return;}
         }
         if(path.isEmpty()) {
             if(ticks-lastRoute<15)return;
@@ -422,7 +490,7 @@ final class CreativeBuilder {
             for(int y=-2;y<=3;y++)for(int x=-3;x<=3;x++)for(int z=-3;z<=3;z++) {
                 FlightRoute.Point p=new FlightRoute.Point(pos.getX()+x,pos.getY()+y,pos.getZ()+z);
                 Vec3d eye=new Vec3d(p.x()+0.5,feetHeight(p)+0.08+session.player.getStandingEyeHeight(),p.z()+0.5);
-                if(failedVantages.getOrDefault(p,0)<=ticks && eye.squaredDistanceTo(hit.getPos())<16 && (!placing || !intersects(placingState,pos,body(p))) && free(p) && visible(eye,hit))candidates.add(p);
+                if(failedVantages.getOrDefault(p,0)<=ticks && eye.squaredDistanceTo(hit.getPos())<16 && (!placing || !intersects(placingState,pos,body(p))) && !intersects(session.world.getBlockState(hit.getBlockPos()),hit.getBlockPos(),body(p)) && (free(p) && visible(eye,hit) || allowPassage && passageCost(p)>0 && sightOpening(eye,hit)!=null))candidates.add(p);
             }
             candidates.sort(Comparator.<FlightRoute.Point>comparingInt(p->preferWalking && ground(p)?0:1).thenComparingInt(p->p.distance(routeStart)));
             routeGoals=candidates.stream().limit(16).toList();walking=false;
@@ -479,23 +547,42 @@ final class CreativeBuilder {
         }
         session.player.setYaw(yaw);session.player.setHeadYaw(yaw);session.player.setPitch(pitch);
     }
-    private void placementLook(BlockHitResult hit,BlockState desired) {
+    private boolean placementLook(BlockHitResult hit,BlockState desired) {
         look(hit.getPos());
-        var property=desired.getBlock().getStateManager().getProperty("facing");
-        if(property==null || target==null || !building.properties.get(target).containsKey("facing"))return;
-        var context=new net.minecraft.item.ItemPlacementContext(session.player,Hand.MAIN_HAND,session.player.getMainHandStack(),hit);
-        BlockState predicted=desired.getBlock().getPlacementState(context);
+        BlockState predicted=predictedPlacement(hit,session.player.getMainHandStack(),building.position(target));
         // Furniture faces the player; stairs and beds face away. Six-way blocks
         // such as barrels also use pitch, so reversing yaw alone cannot face up.
-        if(predicted!=null && predicted.get(property).equals(desired.get(property)))return;
+        if(building.placementMatches(target,predicted))return true;
         float yaw=session.player.getYaw(),pitch=session.player.getPitch();
-        for(float tilt:new float[]{pitch,0,90,-90})for(float turn:new float[]{yaw+180,yaw,yaw+90,yaw-90}) {
+        float[] turns=new float[]{yaw+180,yaw,yaw+90,yaw-90};
+        if(building.properties.get(target).containsKey("rotation")){turns=new float[16];for(int i=0;i<16;i++)turns[i]=i*22.5f;}
+        for(float tilt:new float[]{pitch,0,90,-90})for(float turn:turns) {
             session.player.setYaw(turn);session.player.setHeadYaw(turn);session.player.setPitch(tilt);
-            predicted=desired.getBlock().getPlacementState(context);
-            if(predicted!=null && predicted.get(property).equals(desired.get(property)))return;
+            predicted=predictedPlacement(hit,session.player.getMainHandStack(),building.position(target));
+            if(building.placementMatches(target,predicted))return true;
         }
         session.player.setYaw(yaw);session.player.setHeadYaw(yaw);session.player.setPitch(pitch);
+        return false;
     }
-    private void postpone(){if(target!=null)postponed.put(target,ticks+120);target=null;path=List.of();search=null;failedRoutes=0;}
+    private BlockState predictedPlacement(BlockHitResult hit,ItemStack stack,BlockPos pos) {
+        if(!(stack.getItem() instanceof net.minecraft.item.BlockItem item))return null;
+        var context=item.getPlacementContext(new net.minecraft.item.ItemPlacementContext(session.player,Hand.MAIN_HAND,stack,hit));
+        if(context==null || !context.getBlockPos().equals(pos) || !context.canPlace())return null;
+        return ((com.dummymod.mixin.BlockItemPlacementAccessor)item).dummymod$placementState(context);
+    }
+    private boolean placementTurnReady(BlockPos pos) {
+        var props=building.properties.get(target);
+        if(!props.containsKey("facing") && !props.containsKey("rotation"))return true;
+        float yaw=MathHelper.wrapDegrees(session.player.getYaw()),pitch=session.player.getPitch();
+        // Server LivingEntity.getYaw(1) reads headYaw, which follows body yaw
+        // during its tick. A look packet and use packet in the same tick can
+        // therefore place six-way blocks using the previous head direction.
+        if(!pos.equals(turnTarget) || Math.abs(MathHelper.wrapDegrees(yaw-turnYaw))>0.01 || Math.abs(pitch-turnPitch)>0.01) {
+            turnTarget=pos.toImmutable();turnYaw=yaw;turnPitch=pitch;turnStarted=ticks;
+            session.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.LookAndOnGround(yaw,pitch,session.player.isOnGround(),session.player.horizontalCollision));
+        }
+        return ticks-turnStarted>=2;
+    }
+    private void postpone(){if(target!=null)postponed.put(target,ticks+120);target=null;actionHit=null;turnTarget=null;path=List.of();search=null;failedRoutes=0;}
     private static FlightRoute.Point point(BlockPos p){return new FlightRoute.Point(p.getX(),p.getY(),p.getZ());}
 }

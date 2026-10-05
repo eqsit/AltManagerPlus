@@ -98,6 +98,15 @@ public final class RegressionChecks {
         check(watch.observe(20,false,false,20) && watch.recover(),"Stationary stalled build recovered after ten seconds");
         watch.recover();watch.recover();watch.recover();check(!watch.recover(),"Recovery attempts bounded");
         watch.observe(19,false,false,20);check(watch.recover(),"Actual block progress restores recovery budget");
+        var searchWatch=new ProgressWatch();searchWatch.observe(20,false,false,20,true);
+        boolean planningSafe=true;for(int i=0;i<89;i++)planningSafe&=!searchWatch.observe(20,false,false,20,true);
+        check(planningSafe && searchWatch.observe(20,false,false,20,true),"Repeated route planning cannot reset the no-progress timeout forever");
+        check(!searchWatch.observe(19,false,false,20,true),"A confirmed block resets the planning timeout");
+        var oscillatingWatch=new ProgressWatch();oscillatingWatch.observe(20,false,false,20);
+        boolean oscillatingStall=false;for(int i=0;i<30;i++)oscillatingStall|=oscillatingWatch.observe(i%2==0?21:20,true,false,20);
+        check(oscillatingStall,"Breaking and replacing one cell cannot disguise a stall as progress");
+        oscillatingWatch.recover();oscillatingWatch.observe(21,false,false,20);oscillatingWatch.observe(20,false,false,20);
+        check(oscillatingWatch.retries()==1,"Returning to an old remaining count does not replenish recovery attempts");
         var start=new FlightRoute.Point(0,0,0);var goal=new FlightRoute.Point(4,0,0);
         var route=FlightRoute.find(start,goal,p->p.y()>=0 && !(p.x()==2 && p.y()<3),2000);
         check(!route.isEmpty() && route.getLast().equals(goal) && route.stream().anyMatch(p->p.y()>=3),"Creative route flies over blocking wall without scaffolding");
