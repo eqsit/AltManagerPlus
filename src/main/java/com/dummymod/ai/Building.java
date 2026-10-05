@@ -125,17 +125,19 @@ public final class Building {
     public boolean approved(){return approved;}
     public boolean finished(){return finished;}
     public String diagnostic(){return creative()?flight.diagnostic():status();}
+    boolean temporaryPassage(){return flight.repairing();}
+    void navigationFailure(String reason){pause();say.accept(reason+" Проект сохранён.");}
     public void tick(boolean allowBreaking) {
         if(!approved || paused || finished || session.world==null || session.player==null)return;
         ticks++;
         if(autoGive)giveWatch.observe(this::inventoryCount);
         if(usingCreative!=creative()) {usingCreative=creative();flight.release();BaritoneBridge.execute(session,"stop");running=false;stage=Map.of();clearing=false;watch.reset();terrainPrepared=false;if(!usingCreative){preparation.forEach(c->{states.remove(c);properties.remove(c);});preparation.clear();}}
         if(creative() && allowBreaking && !terrainPrepared){prepareTerrain();terrainPrepared=true;}
-        if(creative() && !stage.isEmpty())flight.tick(stage,allowBreaking,clearing);
+        if(creative() && (!stage.isEmpty() || flight.repairing()))flight.tick(stage,allowBreaking,clearing);
         else if(flight.controls()){flight.release();running=false;}
         if(ticks%20!=0)return;
         List<BuildPlan.Cell> remaining=states.keySet().stream().filter(this::needs).toList();
-        if(remaining.isEmpty()) {
+        if(remaining.isEmpty() && !flight.repairing()) {
             if(++settleChecks<3)return;
             finished=true;running=false;flight.release();BaritoneBridge.execute(session,"stop");say.accept("Готово: «"+plan.name+"». Проверила все блоки проекта в мире.");return;
         }
@@ -154,13 +156,13 @@ public final class Building {
             List<BuildPlan.Cell> work=clearing?obstructions:remaining;
             for(BuildPlan.Cell c:work) {
                 Item item=states.get(c).getBlock().asItem();
-                if(!clearing && !kinds.contains(item) && kinds.size()>=8)break;
+                if(!creative() && !clearing && !kinds.contains(item) && kinds.size()>=8)break;
                 Map<String,String> props=properties.get(c);
                 int cost=states.get(c).isAir() || "upper".equals(props.get("half")) || "head".equals(props.get("part"))?0:"double".equals(props.get("type"))?2:1;
                 String id=Registries.ITEM.getId(item).toString();int available=budget.getOrDefault(id,0);
                 if(!creative() && !autoGive && cost>available && !batch.isEmpty())break;
                 budget.put(id,available-cost);
-                batch.put(c,states.get(c));kinds.add(item);if(batch.size()>=(watch.retries()>0?32:128))break;
+                batch.put(c,states.get(c));kinds.add(item);if(batch.size()>=(creative()?512:watch.retries()>0?32:128))break;
             }
             stage=batch;
         }
@@ -234,8 +236,8 @@ public final class Building {
     private boolean checkProgress(List<BuildPlan.Cell> remaining,IBaritone b,boolean creative) {
         Vec3d now=new Vec3d(session.player.getX(),session.player.getY(),session.player.getZ());boolean moving=lastPosition!=null && now.squaredDistanceTo(lastPosition)>0.04;lastPosition=now;
         // Removing terrain is progress even when the replacement block is not placed yet.
-        int work=remaining.size()+(creative?(int)remaining.stream().filter(this::obstructed).count():0);
-        if(!watch.observe(work,moving,false,20))return false;
+        int work=remaining.size()+(creative?(int)remaining.stream().filter(this::obstructed).count():0)+(flight.repairing()?1:0);
+        if(!watch.observe(work,moving,creative && flight.planning(),20))return false;
         if(!watch.recover()) {String point=creative?flight.diagnostic():position(remaining.getFirst()).toShortString();pause();say.accept("Не удалось "+(clearing?"расчистить":"поставить блок на")+" этот участок: "+point+". Проверь доступ к блокам и защиту территории. Проект сохранён; напиши «продолжай».");return true;}
         org.slf4j.LoggerFactory.getLogger("DummyMod-AI").info("Recovering builder for {}, remaining={}, attempt={}, creative={}, clearing={}, target={}",session.displayName(),remaining.size(),watch.retries(),creative,clearing,creative?flight.diagnostic():position(remaining.getFirst()).toShortString());
         if(watch.retries()==1)say.accept("Застряла на этом участке. Меняю подход и продолжаю сама.");

@@ -103,6 +103,29 @@ public final class RegressionChecks {
         check(!route.isEmpty() && route.getLast().equals(goal) && route.stream().anyMatch(p->p.y()>=3),"Creative route flies over blocking wall without scaffolding");
         var before=start;for(var p:route){check(before.distance(p)==1,"Flight never cuts solid corners");before=p;}
         check(FlightRoute.find(start,goal,p->p.equals(start),100).isEmpty(),"Unreachable flight goal bounded");
+        var roof=new FlightRoute.Point(14,30,14);var room=new FlightRoute.Point(10,1,10);
+        java.util.function.Predicate<FlightRoute.Point> palaceFree=p->{
+            boolean inside=p.x()>=0 && p.x()<=26 && p.z()>=0 && p.z()<=26 && p.y()>=0 && p.y()<=29;
+            boolean shell=inside && (p.x()==0 || p.x()==26 || p.z()==0 || p.z()==26 || p.y()==0 || p.y()==29);
+            boolean doorway=p.x()==0 && p.z()==13 && p.y()>=1 && p.y()<=2;
+            return p.y()>=1 && (!shell || doorway);
+        };
+        var incremental=new FlightRoute.Search(roof,List.of(room),p->palaceFree.test(p)?1:0,30000);
+        incremental.advance(10,100_000_000);int explored=incremental.visited();
+        check(!incremental.done() && explored>0,"Large roof-to-room search yields without blocking one client tick");
+        while(!incremental.done())incremental.advance(100,100_000_000);
+        check(!incremental.result().isEmpty() && incremental.result().stream().anyMatch(p->p.x()==0 && p.z()==13 && p.y()<=2),"Large palace routing retains its frontier and finds the existing entrance");
+        var sealed=new FlightRoute.Search(roof,List.of(room),p->palaceFree.test(p) && !(p.x()==0 && p.z()==13 && p.y()<=2)?1:41,30000);
+        while(!sealed.done())sealed.advance(100,100_000_000);
+        check(!sealed.result().isEmpty(),"A sealed room has a weighted route through removable masonry");
+        Path passageFile=Files.createTempDirectory("dummymod-passage-test-").resolve("passage.json");
+        var journal=new PassageJournal(passageFile);var brick=new PassageJournal.Entry(172,105,209,"minecraft:polished_blackstone_bricks");journal.remember(brick);
+        check(new PassageJournal(passageFile).entries().equals(List.of(brick)),"Original passage blocks survive a restart before restoration");
+        journal.remember(brick);check(journal.entries().size()==1,"Repeated excavation never replaces the saved original block");
+        journal.restored(brick);check(new PassageJournal(passageFile).entries().isEmpty(),"Confirmed restoration clears the durable repair record");
+        Files.delete(passageFile);Files.delete(passageFile.getParent());
+        Path blockedJournal=Files.createTempFile("dummymod-blocked-journal-",".tmp");var failedJournal=new PassageJournal(blockedJournal.resolve("passage.json"));
+        try{failedJournal.remember(brick);throw new AssertionError("Excavation journal accepted an unwritable destination");}catch(java.io.IOException expected){check(failedJournal.entries().isEmpty(),"Failed durable save leaves no in-memory permission to excavate");}finally{Files.delete(blockedJournal);}
         check(Supply.command("Dummy_01","minecraft:stone",64).equals("give Dummy_01 minecraft:stone 64"),"Supply targets exact own account");
         try{Supply.command("@a","minecraft:stone",64);throw new AssertionError("Supply selector accepted");}catch(IllegalArgumentException expected){checks++;}
         try{Supply.command("Dummy_01","minecraft:stone;op Enemy",64);throw new AssertionError("Supply command injection accepted");}catch(IllegalArgumentException expected){checks++;}

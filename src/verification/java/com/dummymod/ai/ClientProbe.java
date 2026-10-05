@@ -21,6 +21,8 @@ public final class ClientProbe implements ClientModInitializer {
     private boolean apiDone,apiPassed;
     private boolean shovelUsed,walkSeen,fastSeen,slowSeen;
     private boolean checkpoint;
+    private boolean passageSeen;
+    private final java.util.Deque<String> interiorReset=new java.util.ArrayDeque<>();
     private int stressTotal;
     private com.google.gson.JsonObject stressDesign;
     private com.dummymod.dummy.PlayerSession creativeSession;
@@ -37,7 +39,8 @@ public final class ClientProbe implements ClientModInitializer {
                 c.setScreen(new AiConfigScreen(null));
                 if(c.currentScreen.children().size()<8)throw new AssertionError("AI menu widgets missing");
                 log("PASS: AI menu opens with masked API-key input");phase=1;
-                CompletableFuture.runAsync(()->{
+                if(System.getProperty("dummymod.probeInterior")!=null){apiDone=true;apiPassed=true;}
+                else CompletableFuture.runAsync(()->{
                     try {var response=OmniClient.ask("You are a Minecraft architect. Reply ONLY JSON {\"reply\":\"Привет!\",\"action\":\"chat\"}. "+"Keep resources negotiable. ".repeat(100),java.util.List.of(new Conversation.Message("user","Привет")));apiPassed=response.has("reply");log("PASS: actual Java OmniRoute client responds");}
                     catch(Exception e){log("FAIL API: "+e.getClass().getSimpleName()+" "+e.getMessage());}
                     finally{apiDone=true;}
@@ -55,6 +58,7 @@ public final class ClientProbe implements ClientModInitializer {
                 wait=0;creativeSession=DummyManager.spawnDummy("FlightProbe");phase=11;return;
             }
             if(phase==11 && creativeSession!=null && creativeSession.isValid() && ++wait>80) {
+                if(System.getProperty("dummymod.probeInterior")!=null){prepareInterior(c);return;}
                 wait=0;origin=creativeSession.player.getBlockPos().add(3,0,0);
                 c.getNetworkHandler().sendChatCommand("fill "+origin.toShortString().replace(",","")+" "+origin.add(2,8,2).toShortString().replace(",","")+" air");
                 c.getNetworkHandler().sendChatCommand("setblock "+origin.add(1,0,1).toShortString().replace(",","")+" stone");
@@ -186,6 +190,50 @@ public final class ClientProbe implements ClientModInitializer {
                 log("PASS: controller resumes from native project menu without rebuilding completed blocks");
                 Files.writeString(Path.of("build/client-probe-result.txt"),"PASS menu/API/chain/terrain preparation/shovel/walking/fast and slow flight/"+(Boolean.getBoolean("dummymod.probeSkipSurvival")?"":"survival/give/")+"full user palace/checkpoint restore/native project menu resume; initial cells="+stressTotal);phase=6;c.scheduleStop();
             }
+            if(phase==20 && !interiorReset.isEmpty()){for(int i=0;i<4 && !interiorReset.isEmpty();i++)c.getNetworkHandler().sendChatCommand(interiorReset.removeFirst());return;}
+            if(phase==20 && ++wait>80) {
+                wait=0;building=new Building(creativeSession,BuildPlan.parse(stressDesign),ClientProbe::log);building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();
+                stressTotal=(int)building.states.keySet().stream().filter(building::needs).count();log("Interior begins on palace roof, missing="+stressTotal);phase=21;return;
+            }
+            if(phase==21) {
+                building.tick(true);wait++;
+                if(ticks%100==0)log("Interior remaining="+building.states.keySet().stream().filter(building::needs).count()+"; "+building.status()+"; "+building.diagnostic());
+                if(building.finished()) {
+                    var saved=JsonParser.parseString(Files.readString(Path.of(System.getProperty("dummymod.probePalace")))).getAsJsonObject();
+                    var design=saved.getAsJsonObject("source").deepCopy();design.add("origin",stressDesign.get("origin").deepCopy());
+                    var palace=new Building(creativeSession,BuildPlan.parse(design),ClientProbe::log);
+                    for(var cell:palace.states.keySet())if(!building.states.containsKey(cell) && !palace.matches(cell,creativeSession.world.getBlockState(palace.position(cell))))throw new AssertionError("Palace damaged at "+palace.position(cell));
+                    log("PASS: exact user interior completed from roof, temporary passage restored and original palace preserved");
+                    if(Boolean.getBoolean("dummymod.probePassage")) {
+                        building.stop();var h=c.getNetworkHandler();h.sendChatCommand("fill 140 -60 80 146 -54 86 stone hollow");h.sendChatCommand("tp FlightProbe 143.5 -52.92 83.5");h.sendChatCommand("tp DummyProbeHost 137 -60 78");wait=0;phase=22;return;
+                    }
+                    Files.writeString(Path.of("build/client-probe-result.txt"),"PASS exact interior from roof / temporary passage restoration / original palace preserved; cells="+stressTotal);phase=6;c.scheduleStop();
+                }
+                if(wait>9000 || building.status().equals("Стройка на паузе"))throw new AssertionError("Interior stalled: "+building.diagnostic());
+            }
+            if(phase==22 && ++wait>60) {
+                wait=0;var design=JsonParser.parseString("{\"name\":\"sealed room passage\",\"origin\":[143,-59,83],\"operations\":[{\"from\":[0,0,0],\"to\":[0,0,0],\"block\":\"minecraft:gold_block\"}]}").getAsJsonObject();
+                building=new Building(creativeSession,BuildPlan.parse(design),ClientProbe::log);building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();phase=23;return;
+            }
+            if(phase==23) {
+                building.tick(true);wait++;passageSeen|=building.temporaryPassage();
+                if(!checkpoint && building.temporaryPassage()) {
+                    checkpoint=true;building.pause();var saved=new Conversation(Path.of("build/passage-saved-history.json"));saved.plan=building.plan.source.deepCopy();saved.dimension="minecraft:overworld";saved.save();wait=0;phase=24;return;
+                }
+                if(ticks%100==0)log("Sealed passage: "+building.status()+"; "+building.diagnostic());
+                if(building.finished()) {
+                    if(!passageSeen)throw new AssertionError("Sealed room test never excavated a passage");
+                    for(int x=140;x<=146;x++)for(int y=-60;y<=-54;y++)for(int z=80;z<=86;z++)if((x==140 || x==146 || y==-60 || y==-54 || z==80 || z==86) && !creativeSession.world.getBlockState(new BlockPos(x,y,z)).isOf(Blocks.STONE))throw new AssertionError("Passage was not restored at "+x+","+y+","+z);
+                    log("PASS: entered a sealed stone room through a temporary opening, placed its interior block and restored every original wall/roof block");
+                    Files.writeString(Path.of("build/client-probe-result.txt"),"PASS exact palace interior / sealed room excavation / all temporary blocks restored / palace preserved");phase=6;c.scheduleStop();
+                }
+                if(wait>3600 || building.status().equals("Стройка на паузе"))throw new AssertionError("Sealed passage stalled: "+building.diagnostic());
+            }
+            if(phase==24 && ++wait>20) {
+                var saved=new Conversation(Path.of("build/passage-saved-history.json"));building=new Building(creativeSession,BuildPlan.parse(saved.plan),ClientProbe::log);
+                if(!building.temporaryPassage())throw new AssertionError("Temporary opening did not survive executor reload");
+                building.mode(true,false);building.flightSpeed(FlightSpeed.FAST);building.start();log("PASS: executor recreated from disk while its passage is open; original wall blocks retained for restoration");wait=0;phase=23;return;
+            }
             if(phase==2 && c.currentScreen instanceof CreateWorldScreen screen) {
                 screen.getWorldCreator().setWorldName("DummyMod integration probe");
                 screen.getWorldCreator().setGameMode(WorldCreator.Mode.SURVIVAL);
@@ -225,5 +273,22 @@ public final class ClientProbe implements ClientModInitializer {
         var coordinates=new com.google.gson.JsonArray();coordinates.add(origin.getX());coordinates.add(origin.getY());coordinates.add(origin.getZ());stressDesign.add("origin",coordinates);
         var h=c.getNetworkHandler();h.sendChatCommand("gamemode creative FlightProbe");h.sendChatCommand("tp FlightProbe 79 -60 79");h.sendChatCommand("tp DummyProbeHost 78 -60 78");
         wait=0;phase=16;
+    }
+    private void prepareInterior(MinecraftClient c) throws Exception {
+        var saved=JsonParser.parseString(Files.readString(Path.of(System.getProperty("dummymod.probeInterior")))).getAsJsonObject();
+        stressDesign=saved.getAsJsonObject("source").deepCopy();
+        var coordinates=new com.google.gson.JsonArray();coordinates.add(80);coordinates.add(-60);coordinates.add(80);stressDesign.add("origin",coordinates);
+        if(Boolean.getBoolean("dummymod.probeResetInterior")) {
+            var palaceSaved=JsonParser.parseString(Files.readString(Path.of(System.getProperty("dummymod.probePalace")))).getAsJsonObject();
+            var original=palaceSaved.getAsJsonObject("source").deepCopy();original.add("origin",coordinates.deepCopy());var palace=BuildPlan.parse(original);
+            for(var cell:BuildPlan.parse(stressDesign).cells.keySet()) {
+                String block=palace.cells.getOrDefault(cell,"minecraft:air");
+                int bracket=block.indexOf('[');String suffix=bracket<0?"":block.substring(bracket);
+                block=BlockNames.resolve(bracket<0?block:block.substring(0,bracket))+suffix;
+                interiorReset.add("setblock "+(80+cell.x())+" "+(-60+cell.y())+" "+(80+cell.z())+" "+block);
+            }
+        }
+        var h=c.getNetworkHandler();h.sendChatCommand("gamemode creative FlightProbe");h.sendChatCommand("tp FlightProbe 97.5 -32.92 92.15");h.sendChatCommand("tp DummyProbeHost 78 -60 78");
+        wait=0;phase=20;
     }
 }

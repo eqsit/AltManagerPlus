@@ -16,6 +16,7 @@ dummymod-ai.json
 dummymod.json
 dummymod-ai-history/
 dummymod-ai-saved-projects/
+dummymod-ai-passages/
 .env
 .env.*
 *.key
