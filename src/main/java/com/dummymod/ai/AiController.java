@@ -77,6 +77,7 @@ public final class AiController {
         if(busy || pending.isEmpty() || !session.isValid())return;
         String message=pending.removeFirst();history.add("user",message);history.save();
         String prompt=prompt();List<Conversation.Message> messages=history.requestMessages();long token=++generation;busy=true;
+        int bottomY=session.world.getBottomY(),topY=session.world.getTopYInclusive();
         org.slf4j.LoggerFactory.getLogger("DummyMod-AI").info("AI request started for {}, generation={}, history_messages={}",session.displayName(),token,messages.size());
         request=WORKERS.submit(()-> {
             PlanRepair.Result response=null;Exception error=null;
@@ -85,7 +86,10 @@ public final class AiController {
                 history.reject(draft,reason);history.save();
                 org.slf4j.LoggerFactory.getLogger("DummyMod-AI").warn("AI blueprint repair {}, generation={}: {}",attempt,token,reason);
                 if(attempt==1)say("В чертеже есть ошибка. Проверяю и исправляю схему перед строительством.");
-            }));}catch(InterruptedException cancelled){Thread.currentThread().interrupt();return;}catch(Exception e){error=e;}
+            }),plan->{
+                if(plan.origin[1]<bottomY || plan.origin[1]+plan.height-1>topY)throw new IllegalArgumentException("Проект за пределами высоты мира");
+                Building.validateBlocks(plan);
+            });}catch(InterruptedException cancelled){Thread.currentThread().interrupt();return;}catch(Exception e){error=e;}
             PlanRepair.Result result=response;Exception failure=error;
             MinecraftClient.getInstance().execute(()->complete(token,result,failure));
         });
@@ -95,9 +99,10 @@ public final class AiController {
             busy=false;
             DummyConfig c=DummyConfig.getInstance();
             if(!session.isValid() || !c.aiEnabled || !ChatAccess.allowed(c.aiChatWhitelist,owner))return;
-            if(error!=null){Throwable cause=error.getCause()==null?error:error.getCause();
-                org.slf4j.LoggerFactory.getLogger("DummyMod-AI").warn("AI request failed for {} ({})",session.displayName(),cause instanceof ApiFailure f?f.getMessage():cause.getClass().getSimpleName());
-                say(cause instanceof ApiFailure f?f.userMessage():cause instanceof PlanRepair.InvalidPlan e?"Не получилось исправить схему: "+safeError(e)+". Черновик и прежний проект сохранены; напиши «исправь схему».":"Не удалось получить ответ OmniRoute после повторных попыток. Проект и переписка сохранены, текущая стройка продолжается.");}
+            if(error!=null){Throwable cause=error;
+                while((cause instanceof java.util.concurrent.ExecutionException || cause instanceof java.util.concurrent.CompletionException) && cause.getCause()!=null)cause=cause.getCause();
+                org.slf4j.LoggerFactory.getLogger("DummyMod-AI").warn("AI request failed for {} ({})",session.displayName(),cause instanceof ApiFailure f?f.getMessage():cause instanceof ModelFailure f?f.kind+": "+f.getMessage():cause.getClass().getSimpleName());
+                say(cause instanceof ApiFailure f?f.userMessage():cause instanceof ModelFailure f?f.userMessage():cause instanceof PlanRepair.InvalidPlan e?"Не получилось исправить схему: "+safeError(e)+". Черновик и прежний проект сохранены; напиши «исправь схему».":"Не удалось получить ответ OmniRoute после повторных попыток. Проект и переписка сохранены.");}
             else {
                 org.slf4j.LoggerFactory.getLogger("DummyMod-AI").info("AI response received for {}, generation={}",session.displayName(),token);
                 try{apply(response.response(),response.plan());}catch(Exception e){

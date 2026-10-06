@@ -34,24 +34,34 @@ public final class Building {
     private String lastNeed="";
     private long lastPickup,lastNotice;
     private final Consumer<String> say;
+    private record Material(BlockState state,Map<String,String> properties) { }
     public Building(PlayerSession session,BuildPlan plan,Consumer<String> say) {
         this.session=session;this.plan=plan;this.say=say;
         flight=new CreativeBuilder(session,this);
         if(session.world==null || plan.origin[1]<session.world.getBottomY() || plan.origin[1]+plan.height-1>session.world.getTopYInclusive())throw new IllegalArgumentException("Проект за пределами высоты мира");
+        Map<String,Material> materials=new HashMap<>();
         for(var e:plan.cells.entrySet()) {
-            String spec=e.getValue();int bracket=spec.indexOf('[');
-            Identifier id=BlockNames.resolve(bracket<0?spec:spec.substring(0,bracket));
-            if(id==null || !Registries.BLOCK.containsId(id))throw new IllegalArgumentException("Неизвестный блок: "+spec);
-            Block block=Registries.BLOCK.get(id);BlockState state=block.getDefaultState();Map<String,String> props=new HashMap<>();
-            if(bracket>=0) for(String pair:spec.substring(bracket+1,spec.length()-1).split(",")) {
-                String[] kv=pair.split("=",2);if(kv.length!=2)throw new IllegalArgumentException("Неверные свойства блока");
-                Property<?> p=block.getStateManager().getProperty(kv[0]);
-                if(p==null)throw new IllegalArgumentException("Нет свойства "+kv[0]+" у "+id);
-                state=with(state,p,kv[1]);props.put(kv[0],kv[1]);
-            }
-            if(!state.isAir() && block.asItem()==Items.AIR)throw new IllegalArgumentException("Нельзя установить вручную: "+id+". Нужен проект из размещаемых блоков");
-            states.put(e.getKey(),state);properties.put(e.getKey(),Map.copyOf(props));
+            Material material=materials.computeIfAbsent(e.getValue(),Building::material);
+            states.put(e.getKey(),material.state());properties.put(e.getKey(),material.properties());
         }
+    }
+    /** Read only the frozen block registry; safe for the background blueprint check. */
+    static void validateBlocks(BuildPlan plan) {
+        for(String spec:new HashSet<>(plan.cells.values()))material(spec);
+    }
+    private static Material material(String spec) {
+        int bracket=spec.indexOf('[');
+        Identifier id=BlockNames.resolve(bracket<0?spec:spec.substring(0,bracket));
+        if(id==null || !Registries.BLOCK.containsId(id))throw new IllegalArgumentException("Неизвестный блок: "+spec);
+        Block block=Registries.BLOCK.get(id);BlockState state=block.getDefaultState();Map<String,String> props=new HashMap<>();
+        if(bracket>=0)for(String pair:spec.substring(bracket+1,spec.length()-1).split(",")) {
+            String[] kv=pair.split("=",2);if(kv.length!=2)throw new IllegalArgumentException("Неверные свойства блока");
+            Property<?> p=block.getStateManager().getProperty(kv[0]);
+            if(p==null)throw new IllegalArgumentException("Нет свойства "+kv[0]+" у "+id);
+            state=with(state,p,kv[1]);props.put(kv[0],kv[1]);
+        }
+        if(!state.isAir() && block.asItem()==Items.AIR)throw new IllegalArgumentException("Нельзя установить вручную: "+id+". Нужен проект из размещаемых блоков");
+        return new Material(state,Map.copyOf(props));
     }
     private static <T extends Comparable<T>> BlockState with(BlockState state,Property<T> prop,String value) {
         return state.with(prop,prop.parse(value).orElseThrow(()->new IllegalArgumentException("Неверное значение "+prop.getName()+"="+value)));

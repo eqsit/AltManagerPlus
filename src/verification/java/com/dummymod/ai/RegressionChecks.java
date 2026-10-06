@@ -13,6 +13,11 @@ public final class RegressionChecks {
     private static void check(boolean value,String description){if(!value)throw new AssertionError(description);checks++;}
     private static JsonObject plan(String ops){return JsonParser.parseString("{\"name\":\"test\",\"origin\":[3,64,0],\"operations\":"+ops+"}").getAsJsonObject();}
     private static void rejects(String ops){try{BuildPlan.parse(plan(ops));throw new AssertionError("Unsafe plan accepted");}catch(IllegalArgumentException e){checks++;}}
+    private static String response(String content,String finish){return new Gson().toJson(Map.of("choices",List.of(Map.of("message",Map.of("content",content),"finish_reason",finish))));}
+    private static void rejectsResponse(String body,ModelFailure.Kind kind)throws Exception {
+        try{ModelResponse.parse(body);throw new AssertionError("Unsafe model response accepted");}
+        catch(ModelFailure e){check(e.kind==kind,"Response failure retains its precise reason: "+kind);}
+    }
     public static void main(String[] args)throws Exception {
         check(FlightSpeed.command("летай с бегом")==FlightSpeed.FAST,"Flight sprint command accepted");
         check(FlightSpeed.command("летай медленно")==FlightSpeed.SLOW,"Slow flight command accepted");
@@ -91,6 +96,26 @@ public final class RegressionChecks {
         String delta1=new Gson().toJson(Map.of("choices",List.of(Map.of("delta",Map.of("content","{\"action\":\"chat\",")))));
         String delta2=new Gson().toJson(Map.of("choices",List.of(Map.of("delta",Map.of("content","\"reply\":\"Привет\"}")))));
         check(ModelResponse.parse("data: "+delta1+"\n\ndata: "+delta2+"\n\ndata: [DONE]\n").get("reply").getAsString().equals("Привет"),"Collect split streaming JSON safely");
+        String complete="{\"action\":\"chat\",\"reply\":\"Готово\"}";
+        rejectsResponse(response(complete,"length"),ModelFailure.Kind.TRUNCATED);
+        rejectsResponse(response(complete,"MAX_TOKENS"),ModelFailure.Kind.TRUNCATED);
+        rejectsResponse(response(complete,"content_filter"),ModelFailure.Kind.FILTERED);
+        rejectsResponse(response("","stop"),ModelFailure.Kind.EMPTY);
+        rejectsResponse(response(complete+"\n{\"action\":\"plan\",","stop"),ModelFailure.Kind.MALFORMED);
+        rejectsResponse(response("Рассуждение: "+complete,"stop"),ModelFailure.Kind.MALFORMED);
+        rejectsResponse(response("{\"unrelated\":true}","stop"),ModelFailure.Kind.MALFORMED);
+        rejectsResponse("{\"choices\":{\"message\":\"invalid envelope\"}}",ModelFailure.Kind.MALFORMED);
+        check(ModelResponse.parse(response("```json\n"+complete+"\n```","stop")).get("reply").getAsString().equals("Готово"),"A complete JSON markdown fence remains compatible");
+        String thought=new Gson().toJson(Map.of("choices",List.of(Map.of("delta",Map.of("reasoning_content","{\"action\":\"start\"}")))));
+        check(ModelResponse.parse("data: "+thought+"\n\ndata: "+delta1+"\n\ndata: "+delta2+"\n\ndata: [DONE]\n").get("action").getAsString().equals("chat"),"Reasoning JSON never becomes a model action");
+        var policyHistory=List.of(new Conversation.Message("user","Спроектируй подробный замок"));
+        JsonObject geminiBody=OmniClient.requestBody("agy/gemini-3.8-flash-high","system",policyHistory,null);
+        check(geminiBody.get("max_tokens").getAsInt()==16384 && geminiBody.getAsJsonObject("thinking").get("budget_tokens").getAsInt()==4096 && geminiBody.getAsJsonObject("response_format").get("type").getAsString().equals("json_object"),"Gemini reserves output capacity and requests JSON without changing the selected model");
+        JsonObject correctedBody=OmniClient.requestBody("agy/gemini-3.8-flash-high","system",policyHistory,new ModelFailure(ModelFailure.Kind.TRUNCATED));
+        check(correctedBody.getAsJsonObject("thinking").get("budget_tokens").getAsInt()==1024 && correctedBody.getAsJsonArray("messages").get(1).getAsJsonObject().get("content").getAsString().contains("Не обрезай и не упрощай"),"A truncated response changes the reasoning budget and asks for a complete design instead of replaying the identical failing request");
+        check(policyHistory.getFirst().content().equals("Спроектируй подробный замок"),"Corrective request does not rewrite saved conversation");
+        JsonObject otherBody=OmniClient.requestBody("test-model","system",policyHistory,null);
+        check(!otherBody.has("thinking") && !otherBody.has("response_format") && otherBody.get("max_tokens").getAsInt()==10000,"Other models retain their existing request format");
         try{ModelResponse.parse("data: "+delta1+"\n");throw new AssertionError("Truncated stream accepted");}catch(java.io.IOException expected){checks++;}
         String malformed=new Gson().toJson(Map.of("choices",List.of(Map.of("delta",Map.of("content","{\"reply\":\"ok\" broken}")))));
         try{ModelResponse.parse("data: "+malformed+"\n\ndata: [DONE]\n");throw new AssertionError("Malformed completed JSON accepted");}catch(java.io.IOException expected){checks++;}
@@ -114,6 +139,13 @@ public final class RegressionChecks {
             return goodDraft.deepCopy();
         },(attempt,response,reason)->{rejectionCalls.incrementAndGet();check(attempt==1 && reason.contains("0..95"),"Rejected world coordinates produce an actionable repair diagnostic");});
         check(repaired.plan().cells.equals(cube.cells) && repairCalls.get()==2 && rejectionCalls.get()==1 && originalTurns.size()==1,"Only a corrected blueprint leaves the repair loop; caller history is immutable");
+        JsonObject unknownMaterial=goodDraft.deepCopy();unknownMaterial.getAsJsonObject("plan").getAsJsonArray("operations").get(0).getAsJsonObject().addProperty("block","minecraft:crimson_carpet");
+        repairCalls.set(0);var materialChecks=new java.util.concurrent.atomic.AtomicInteger();
+        var materialRepair=PlanRepair.ask("system",originalTurns,(system,turns)->{
+            if(repairCalls.incrementAndGet()==1)return unknownMaterial.deepCopy();
+            check(turns.getLast().content().contains("Неизвестный блок"),"Registry validation feeds the missing material back to the model");return goodDraft.deepCopy();
+        },(attempt,response,reason)->{},p->{materialChecks.incrementAndGet();if(p.cells.containsValue("minecraft:crimson_carpet"))throw new IllegalArgumentException("Неизвестный блок: minecraft:crimson_carpet");});
+        check(materialChecks.get()==2 && repairCalls.get()==2 && materialRepair.plan().cells.equals(cube.cells),"A geometrically valid plan with a missing block is repaired before it can reach construction");
         repairCalls.set(0);rejectionCalls.set(0);
         try{PlanRepair.ask("system",originalTurns,(system,turns)->{repairCalls.incrementAndGet();return invalidDraft.deepCopy();},(attempt,response,reason)->rejectionCalls.incrementAndGet());throw new AssertionError("Invalid drafts retried forever");}catch(PlanRepair.InvalidPlan expected){check(repairCalls.get()==3 && rejectionCalls.get()==3,"Model repairs are bounded to two follow-up requests");}
         repairCalls.set(0);
@@ -194,6 +226,18 @@ public final class RegressionChecks {
             byte[] bytes=body.getBytes(java.nio.charset.StandardCharsets.UTF_8);exchange.sendResponseHeaders(call==1?503:call==2?400:200,bytes.length);exchange.getResponseBody().write(bytes);exchange.close();
         });server.start();
         try{check(OmniClient.ask("http://127.0.0.1:"+server.getAddress().getPort()+"/chat/completions","test-key","test-model","system",List.of(new Conversation.Message("user","hello"))).get("reply").getAsString().equals("Привет") && calls.get()==3,"Real HTTP pipeline retries 503, empty 400 and collects successful SSE");}finally{server.stop(0);}
+        var generationServer=com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1",0),0);
+        List<JsonObject> generationBodies=Collections.synchronizedList(new ArrayList<>());
+        generationServer.createContext("/chat/completions",exchange->{
+            generationBodies.add(JsonParser.parseString(new String(exchange.getRequestBody().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject());
+            int call=generationBodies.size();String body=call==1?response(goodDraft.toString(),"length"):call==2?response("{\"action\":\"plan\",","stop"):response(goodDraft.toString(),"stop");
+            byte[] bytes=body.getBytes(java.nio.charset.StandardCharsets.UTF_8);exchange.sendResponseHeaders(200,bytes.length);exchange.getResponseBody().write(bytes);exchange.close();
+        });generationServer.start();
+        try{
+            JsonObject answer=OmniClient.ask("http://127.0.0.1:"+generationServer.getAddress().getPort()+"/chat/completions","test-key","agy/gemini-test","system",policyHistory);
+            check(generationBodies.size()==3 && BuildPlan.parse(answer.getAsJsonObject("plan")).cells.equals(cube.cells),"Real HTTP retries truncated and malformed model answers and accepts only the final complete blueprint");
+            check(generationBodies.get(0).getAsJsonObject("thinking").get("budget_tokens").getAsInt()==4096 && generationBodies.get(1).getAsJsonObject("thinking").get("budget_tokens").getAsInt()==1024 && generationBodies.get(2).getAsJsonObject("thinking").get("budget_tokens").getAsInt()==1024,"Corrective budgets reach the wire and remain bounded across repeated model failures");
+        }finally{generationServer.stop(0);}
         var proxy=new DummyConfig.SocksProxy("127.0.0.1",1080,"","",true);
         EmbeddedChannel channel=new EmbeddedChannel(new ProxyBridge.Socks5ClientHandler(proxy,"test.minecraft",25565));
         ByteBuf greeting=channel.readOutbound();check(greeting.readUnsignedByte()==5,"SOCKS greeting");greeting.release();

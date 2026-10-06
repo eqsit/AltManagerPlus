@@ -18,6 +18,9 @@ public final class PlanRepair {
     private PlanRepair() { }
 
     public static Result ask(String system, List<Conversation.Message> history, Request request, Rejected rejected) throws Exception {
+        return ask(system, history, request, rejected, plan -> { });
+    }
+    public static Result ask(String system, List<Conversation.Message> history, Request request, Rejected rejected, java.util.function.Consumer<BuildPlan> validate) throws Exception {
         List<Conversation.Message> turns = new ArrayList<>(history);
         if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
         JsonObject response = request.ask(system, List.copyOf(turns));
@@ -32,6 +35,7 @@ public final class PlanRepair {
                     throw new IllegalArgumentException("Исправление схемы не разрешает запуск стройки или другие действия");
                 if (!action.equals("plan")) return new Result(response, null);
                 BuildPlan plan = BuildPlan.parse(response.getAsJsonObject("plan"));
+                validate.accept(plan);
                 JsonObject canonical = response.deepCopy(); canonical.add("plan", plan.source);
                 org.slf4j.LoggerFactory.getLogger("DummyMod-AI").info("AI blueprint validated: operations={}, size={}x{}x{}, corners_normalized={}", plan.source.getAsJsonArray("operations").size(), plan.width, plan.height, plan.length, !plan.source.equals(response.get("plan")));
                 return new Result(canonical, plan);
