@@ -19,6 +19,7 @@ public final class BuildPlan {
         length = cells.keySet().stream().mapToInt(Cell::z).max().orElseThrow() + 1;
     }
     public static BuildPlan parse(JsonObject json) {
+        json = json.deepCopy();
         String name = json.has("name") ? json.get("name").getAsString() : "Постройка";
         if (name.length() > 100) name = name.substring(0, 100);
         int[] origin = triple(json.getAsJsonArray("origin"));
@@ -27,14 +28,24 @@ public final class BuildPlan {
         if (operations == null || operations.isEmpty() || operations.size() > 1024) throw new IllegalArgumentException("Нужно 1–1024 операций");
         Map<Cell, String> cells = new HashMap<>();
         long work = 0;
+        int operation = 0;
         for (JsonElement el : operations) {
+            operation++;
             JsonObject op = el.getAsJsonObject();
             String type = op.has("shape") ? op.get("shape").getAsString() : "box";
             if (!Set.of("box", "hollow_box", "sphere", "cylinder").contains(type)) throw new IllegalArgumentException("Неизвестная форма: " + type);
             String block = op.get("block").getAsString();
             if (block.length() > 256 || !block.matches("[a-z0-9_:]+(?:\\[[a-z0-9_=,]+\\])?")) throw new IllegalArgumentException("Неверный блок");
             int[] a = triple(op.getAsJsonArray("from")), b = triple(op.getAsJsonArray("to"));
-            for (int i = 0; i < 3; i++) if (a[i] < 0 || b[i] < a[i] || b[i] >= MAX_SIZE) throw new IllegalArgumentException("Размер проекта: до 96 блоков по каждой оси; координаты from <= to");
+            // A bounding box has the same geometry regardless of which corner
+            // the model lists first. Canonicalize each axis without changing
+            // the origin, footprint, operation order, or block states.
+            for (int i = 0; i < 3; i++) {
+                int low = Math.min(a[i], b[i]), high = Math.max(a[i], b[i]);
+                if (low < 0 || high >= MAX_SIZE) throw new IllegalArgumentException("Операция " + operation + ", ось " + "XYZ".charAt(i) + ": " + low + ".." + high + "; нужны относительные координаты 0..95, абсолютные — только в origin");
+                a[i] = low; b[i] = high;
+            }
+            op.add("from", new Gson().toJsonTree(a)); op.add("to", new Gson().toJsonTree(b));
             work += (long)(b[0]-a[0]+1)*(b[1]-a[1]+1)*(b[2]-a[2]+1);
             if (work > 2000000) throw new IllegalArgumentException("Слишком много операций; раздели проект на части");
             for (int y = a[1]; y <= b[1]; y++) for (int x = a[0]; x <= b[0]; x++) for (int z = a[2]; z <= b[2]; z++) {

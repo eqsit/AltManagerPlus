@@ -70,32 +70,38 @@ public final class AiController {
         String file=UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString()+".json";
         history=new Conversation(FabricLoader.getInstance().getConfigDir().resolve("dummymod-ai-history").resolve(file));
         if(history.plan!=null && dimension.equals(history.dimension))try{building=new Building(session,BuildPlan.parse(history.plan),this::say);building.mode(history.creative,history.autoGive);}catch(Exception ignored){}
-        else {history.archiveCurrent();history.plan=null;history.planComplete=false;}
+        else {history.archiveCurrent();history.plan=null;history.planComplete=false;if(!dimension.equals(history.dimension))history.clearRejected();}
         history.dimension=dimension;
     }
     private void pump() {
         if(busy || pending.isEmpty() || !session.isValid())return;
         String message=pending.removeFirst();history.add("user",message);history.save();
-        String prompt=prompt();List<Conversation.Message> messages=history.messages();long token=++generation;busy=true;
+        String prompt=prompt();List<Conversation.Message> messages=history.requestMessages();long token=++generation;busy=true;
         org.slf4j.LoggerFactory.getLogger("DummyMod-AI").info("AI request started for {}, generation={}, history_messages={}",session.displayName(),token,messages.size());
         request=WORKERS.submit(()-> {
-            JsonObject response=null;Exception error=null;
-            try{response=OmniClient.ask(prompt,messages);}catch(InterruptedException cancelled){Thread.currentThread().interrupt();return;}catch(Exception e){error=e;}
-            JsonObject result=response;Exception failure=error;
+            PlanRepair.Result response=null;Exception error=null;
+            try{response=PlanRepair.ask(prompt,messages,OmniClient::ask,(attempt,draft,reason)->MinecraftClient.getInstance().execute(()->{
+                if(token!=generation || !session.isValid() || !DummyConfig.getInstance().aiEnabled || !ChatAccess.allowed(DummyConfig.getInstance().aiChatWhitelist,owner))return;
+                history.reject(draft,reason);history.save();
+                org.slf4j.LoggerFactory.getLogger("DummyMod-AI").warn("AI blueprint repair {}, generation={}: {}",attempt,token,reason);
+                if(attempt==1)say("В чертеже есть ошибка. Проверяю и исправляю схему перед строительством.");
+            }));}catch(InterruptedException cancelled){Thread.currentThread().interrupt();return;}catch(Exception e){error=e;}
+            PlanRepair.Result result=response;Exception failure=error;
             MinecraftClient.getInstance().execute(()->complete(token,result,failure));
         });
     }
-    private void complete(long token,JsonObject response,Exception error) {
+    private void complete(long token,PlanRepair.Result response,Exception error) {
             if(token!=generation)return;
             busy=false;
             DummyConfig c=DummyConfig.getInstance();
             if(!session.isValid() || !c.aiEnabled || !ChatAccess.allowed(c.aiChatWhitelist,owner))return;
             if(error!=null){Throwable cause=error.getCause()==null?error:error.getCause();
                 org.slf4j.LoggerFactory.getLogger("DummyMod-AI").warn("AI request failed for {} ({})",session.displayName(),cause instanceof ApiFailure f?f.getMessage():cause.getClass().getSimpleName());
-                say(cause instanceof ApiFailure f?f.userMessage():"Не удалось получить ответ OmniRoute после повторных попыток. Проект и переписка сохранены, текущая стройка продолжается.");}
+                say(cause instanceof ApiFailure f?f.userMessage():cause instanceof PlanRepair.InvalidPlan e?"Не получилось исправить схему: "+safeError(e)+". Черновик и прежний проект сохранены; напиши «исправь схему».":"Не удалось получить ответ OmniRoute после повторных попыток. Проект и переписка сохранены, текущая стройка продолжается.");}
             else {
                 org.slf4j.LoggerFactory.getLogger("DummyMod-AI").info("AI response received for {}, generation={}",session.displayName(),token);
-                try{apply(response);}catch(Exception e){
+                try{apply(response.response(),response.plan());}catch(Exception e){
+                    if(response.response().has("plan"))history.reject(response.response(),safeError(e));
                     org.slf4j.LoggerFactory.getLogger("DummyMod-AI").warn("AI project rejected for {}: {}",session.displayName(),safeError(e));
                     say("Не смогла выполнить проект: "+safeError(e)+". Можем изменить план.");
                 }
@@ -123,6 +129,8 @@ public final class AiController {
             Если обычный вход недоступен и ломание разрешено, исполнитель может открыть небольшой временный проход в обычной стене и восстановить её после прохода. Контейнеры и опасные опоры для прохода не разбираются. Проход и временные опоры для установки отдельных декоративных блоков сохраняются на диск и убираются до завершения проекта.
             Для action=plan: "plan":{"name":"...","origin":[ABSOLUTE_X,ABSOLUTE_Y,ABSOLUTE_Z],"operations":[{"shape":"box|hollow_box|sphere|cylinder","from":[x,y,z],"to":[x,y,z],"block":"minecraft:oak_planks"}]}.
             Координаты from/to относительные неотрицательные, включительные, from<=to, <=95. До 50000 ячеек и 1024 операций, большие проекты дели на отдельные части.
+            ВАЖНО: абсолютные мировые координаты используются ТОЛЬКО в origin. Например origin=[1200,70,-900], from=[0,0,0], to=[19,12,15] задают постройку 20×13×16; никогда не пиши [1200,70,-900] в from/to. Проверяй каждую ось каждой операции: 0<=from[i]<=to[i]<=95. Для подвала снизь origin.y и сдвинь ВСЕ относительные Y, сохранив мировое положение постройки.
+            Если в контексте есть отклонённый черновик, он не является согласованным проектом. Используй его для исправления по просьбе хозяина; не запускай строительство отклонённой схемы.
             Операции идут по порядку; более поздние заменяют блоки прежних. Точечный блок = box с одинаковыми from/to.
             Полости hollow_box игнорируют внутренние блоки: для расчистки комнаты/двери добавь явный box с minecraft:air.
             sphere = заполненный эллипсоид в указанном ящике; cylinder = эллиптический цилиндр по Y. Комбинируй любые формы и блоки, не ограничивайся домом.
@@ -138,14 +146,14 @@ public final class AiController {
             """+"\nТвоё имя: "+session.displayName()+"; хозяин: "+owner+"; позиция: "+p.toShortString()+"; мир: "+dimension+"; game_mode="+session.interactionManager.getCurrentGameMode()+"; creative_requested="+history.creative+"; creative_active="+(history.creative && CreativeBuilder.available(session))+"; auto_give="+history.autoGive+"; give_available="+Supply.canGive(session)+"; инвентарь: "+inventory+"; ломание разрешено="+DummyConfig.getInstance().aiAllowBreaking+"; ближайшие блоки="+nearby()+"; текущая постройка="+(building==null?"нет":building.snapshot());
     }
     private String nearby(){List<String> blocks=new ArrayList<>();BlockPos p=session.player.getBlockPos();for(int x=-3;x<=5;x++)for(int z=-3;z<=5;z++)for(int y=-1;y<=2;y++){BlockPos q=p.add(x,y,z);var s=session.world.getBlockState(q);if(!s.isAir())blocks.add(q.toShortString()+":"+Registries.BLOCK.getId(s.getBlock()));}return blocks.toString();}
-    private void apply(JsonObject r) {
+    private void apply(JsonObject r,BuildPlan validatedPlan) {
         String action=r.has("action")?r.get("action").getAsString():"chat";
         switch(action) {
             case "chat" -> {}
             case "plan" -> {
-                BuildPlan plan=BuildPlan.parse(r.getAsJsonObject("plan"));Building replacement=new Building(session,plan,this::say);
+                BuildPlan plan=validatedPlan==null?BuildPlan.parse(r.getAsJsonObject("plan")):validatedPlan;Building replacement=new Building(session,plan,this::say);
                 if(building!=null)building.stop();BaritoneBridge.execute(session,"stop");session.botController.stop();
-                history.archiveCurrent();building=replacement;building.mode(history.creative,history.autoGive);history.plan=plan.source;history.planComplete=false;say(building.description());
+                history.archiveCurrent();building=replacement;building.mode(history.creative,history.autoGive);history.plan=plan.source;history.planComplete=false;history.clearRejected();say(building.description());
             }
             case "start","resume" -> startBuilding();
             case "give" -> {
@@ -180,7 +188,7 @@ public final class AiController {
     private BlockPos coords(JsonObject r,String field) {JsonArray a=r.getAsJsonArray(field);if(a==null || a.size()!=3)throw new IllegalArgumentException("Нужны 3 координаты");int[] c=new int[3];for(int i=0;i<3;i++){double n=a.get(i).getAsDouble();if(!Double.isFinite(n) || n!=Math.rint(n) || Math.abs(n)>29999000)throw new IllegalArgumentException("Неверные координаты");c[i]=(int)n;}if(c[1]<session.world.getBottomY() || c[1]>session.world.getTopYInclusive())throw new IllegalArgumentException("Координата Y вне мира");return new BlockPos(c[0],c[1],c[2]);}
     private baritone.api.IBaritone requiredBaritone(){var b=BaritoneBridge.resolve(session);if(b==null)throw new IllegalArgumentException("Baritone недоступен");return b;}
     private void suspendBuilding(){if(building!=null)building.pause();session.botController.stop();BaritoneBridge.execute(session,"stop");}
-    private void startBuilding(){if(building==null){say("Сначала давай спроектируем постройку.");return;}session.botController.stop();session.autoclicker.enabled=false;BaritoneBridge.execute(session,"stop");building.mode(history.creative,history.autoGive);building.start();say(building.creative()?(DummyConfig.getInstance().aiPreferWalking?"Начинаю в креативе: хожу по доступной поверхности, для подъёма летаю без служебных опор. Блоки беру сама.":"Начинаю в креативе: летаю без служебных опор, блоки беру сама."):history.autoGive && Supply.canGive(session)?"Проект согласован. Запрашиваю материалы командой /give себе и строю по частям.":"Проект согласован. Проверяю ресурсы и начинаю по частям, как только они есть.");if(history.autoGive && !Supply.canGive(session))say("У этой дамми нет доступной команды /give. Понадобятся материалы или права на сервере.");}
+    private void startBuilding(){if(history.rejectedResponse!=null){say("Последняя новая схема ещё не исправлена. Напиши «исправь схему» либо выбери прежний проект в меню «Проекты / память».");return;}if(building==null){say("Сначала давай спроектируем постройку.");return;}session.botController.stop();session.autoclicker.enabled=false;BaritoneBridge.execute(session,"stop");building.mode(history.creative,history.autoGive);building.start();say(building.creative()?(DummyConfig.getInstance().aiPreferWalking?"Начинаю в креативе: хожу по доступной поверхности, для подъёма летаю без служебных опор. Блоки беру сама.":"Начинаю в креативе: летаю без служебных опор, блоки беру сама."):history.autoGive && Supply.canGive(session)?"Проект согласован. Запрашиваю материалы командой /give себе и строю по частям.":"Проект согласован. Проверяю ресурсы и начинаю по частям, как только они есть.");if(history.autoGive && !Supply.canGive(session))say("У этой дамми нет доступной команды /give. Понадобятся материалы или права на сервере.");}
     private void say(String text) {
         String clean=text.replaceAll("[\\p{Cntrl}§]"," ").trim();if(clean.isEmpty())return;
         if(clean.length()>1800)clean=clean.substring(0,1800);
@@ -193,7 +201,7 @@ public final class AiController {
     public void tick() {
         DummyConfig c=DummyConfig.getInstance();
         if(!c.aiEnabled || !ChatAccess.allowed(c.aiChatWhitelist,owner)) {if(building!=null && building.approved())building.pause();if(busy)cancelRequest();outgoing.clear();pending.clear();return;}
-        if(dimension!=null && !dimension.equals(session.world.getRegistryKey().getValue().toString())){if(building!=null)building.stop();building=null;dimension=session.world.getRegistryKey().getValue().toString();if(history!=null){history.archiveCurrent();history.plan=null;history.planComplete=false;history.dimension=dimension;history.save();}say("Мы перешли в другой мир. Старый проект сохранён; выберем новое место.");}
+        if(dimension!=null && !dimension.equals(session.world.getRegistryKey().getValue().toString())){if(building!=null)building.stop();building=null;dimension=session.world.getRegistryKey().getValue().toString();if(history!=null){history.archiveCurrent();history.plan=null;history.planComplete=false;history.clearRejected();history.dimension=dimension;history.save();}say("Мы перешли в другой мир. Старый проект сохранён; выберем новое место.");}
         if(jumpTicks>0 && --jumpTicks==0 && session.baritone!=null)session.baritone.getInputOverrideHandler().setInputForceState(baritone.api.utils.input.Input.JUMP,false);
         if(building!=null){building.flightSpeed(history!=null && history.flightSpeed!=null?history.flightSpeed:c.aiCreativeFlightSpeed);building.preferWalking(c.aiPreferWalking);building.tick(c.aiAllowBreaking);if(building.finished() && history!=null && !history.planComplete){history.planComplete=true;history.save();}}
         if(!outgoing.isEmpty() && System.currentTimeMillis()-lastSend>1800){String msg=outgoing.removeFirst();session.networkHandler.sendChatMessage(msg);lastSend=System.currentTimeMillis();if(history!=null)history.save();}

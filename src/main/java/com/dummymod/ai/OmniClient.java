@@ -40,10 +40,10 @@ public final class OmniClient {
         try {
             for(int attempt=0;;attempt++) {
                 if(Thread.currentThread().isInterrupted())throw new InterruptedException();
-                HttpRequest req=HttpRequest.newBuilder(URI.create(endpoint)).timeout(Duration.ofSeconds(90)).header("Authorization","Bearer "+key).header("Content-Type","application/json").header("Accept","text/event-stream").POST(HttpRequest.BodyPublishers.ofString(body.toString())).build();
+                HttpRequest req=HttpRequest.newBuilder(URI.create(endpoint)).timeout(Duration.ofSeconds(300)).header("Authorization","Bearer "+key).header("Content-Type","application/json").header("Accept","text/event-stream").POST(HttpRequest.BodyPublishers.ofString(body.toString())).build();
                 var pending=HTTP.sendAsync(req,HttpResponse.BodyHandlers.ofString());
                 try {
-                    HttpResponse<String> r=pending.get(95,java.util.concurrent.TimeUnit.SECONDS);
+                    HttpResponse<String> r=pending.get(305,java.util.concurrent.TimeUnit.SECONDS);
                     if(r.statusCode()!=200)throw ApiFailure.response(r.statusCode(),r.body(),key);
                     if(r.body().length()>1500000)throw new IOException("Ответ API слишком большой");
                     return ModelResponse.parse(r.body(),key);

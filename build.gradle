@@ -103,6 +103,11 @@ tasks.register('verifyAi', JavaExec) {
     classpath = sourceSets.verification.runtimeClasspath
     mainClass = 'com.dummymod.ai.RegressionChecks'
 }
+tasks.register('verifyAiLong', JavaExec) {
+    dependsOn verificationClasses
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'com.dummymod.ai.LongOmniChecks'
+}
 check.dependsOn verifyAi
 tasks.register('clientProbeJar', Jar) {
     dependsOn verificationClasses

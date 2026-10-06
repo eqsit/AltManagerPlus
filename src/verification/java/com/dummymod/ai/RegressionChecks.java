@@ -44,7 +44,13 @@ public final class RegressionChecks {
         check(round.cells.size()<100 && round.cells.containsKey(new BuildPlan.Cell(2,3,2)),"Cylinder curved geometry");
         rejects("[{\"from\":[-1,0,0],\"to\":[2,2,2],\"block\":\"stone\"}]");
         rejects("[{\"from\":[0,0,0],\"to\":[96,0,0],\"block\":\"stone\"}]");
-        rejects("[{\"from\":[3,0,0],\"to\":[1,0,0],\"block\":\"stone\"}]");
+        JsonObject reversedSource=plan("[{\"from\":[3,13,4],\"to\":[1,10,2],\"block\":\"minecraft:oak_stairs[facing=north,half=top]\"}]");
+        BuildPlan reversed=BuildPlan.parse(reversedSource);
+        check(reversed.cells.size()==36 && reversed.cells.containsKey(new BuildPlan.Cell(1,10,2)) && reversed.cells.containsKey(new BuildPlan.Cell(3,13,4)),"Reversed corners on every axis retain the complete requested box");
+        check(reversed.source.getAsJsonArray("operations").get(0).getAsJsonObject().get("from").toString().equals("[1,10,2]"),"Saved blueprint uses canonical corners");
+        check(reversedSource.getAsJsonArray("operations").get(0).getAsJsonObject().get("from").toString().equals("[3,13,4]"),"Validation leaves the original model draft untouched");
+        check(Arrays.equals(reversed.origin,new int[]{3,64,0}) && reversed.cells.values().stream().allMatch(v->v.equals("minecraft:oak_stairs[facing=north,half=top]")),"Corner normalization preserves the absolute origin and directional block states");
+        rejects("[{\"from\":[96,0,0],\"to\":[94,0,0],\"block\":\"stone\"}]");
         rejects("[{\"from\":[0.5,0,0],\"to\":[2,2,2],\"block\":\"stone\"}]");
         rejects("[{\"from\":[0,0,0],\"to\":[95,95,95],\"block\":\"stone\"}]");
         rejects("[{\"shape\":\"execute\",\"from\":[0,0,0],\"to\":[0,0,0],\"block\":\"stone\"}]");
@@ -68,9 +74,15 @@ public final class RegressionChecks {
         var imported=new Conversation(file);
         check(imported.projects().size()==3 && imported.projects().stream().anyMatch(p->p.id().equals("export")),"Independent saved blueprint imports and duplicate files collapse");
         check(imported.projects().stream().noneMatch(p->p.id().equals("foreign")),"Another owner's exported blueprint remains isolated");
+        JsonObject invalidDraft=new JsonObject();invalidDraft.addProperty("action","plan");invalidDraft.add("plan",plan("[{\"from\":[1200,0,0],\"to\":[1203,2,2],\"block\":\"stone\"}]"));
+        imported.reject(invalidDraft,"Операция 1, ось X: нужны относительные координаты");imported.save();var draftReload=new Conversation(file);
+        check(draftReload.rejectedResponse.equals(invalidDraft) && draftReload.plan.equals(cube.source),"A rejected blueprint survives restart without replacing the current approved design");
+        draftReload.add("user","исправь схему");var draftTurns=draftReload.requestMessages();
+        check(draftTurns.getLast().role().equals("user") && draftTurns.get(draftTurns.size()-2).content().equals(invalidDraft.toString()) && draftReload.messages().size()==300,"Next repair request sees the original draft while stored chat remains capped at 300 messages");
         imported.clear();var cleared=new Conversation(file);
         check(cleared.messages().isEmpty(),"Clear persists");
         check(cleared.plan.equals(cube.source) && cleared.projects().size()==3,"Clearing chat preserves current and earlier project schemas");
+        check(cleared.rejectedResponse==null && cleared.rejectedReason==null,"Clearing chat also clears failed-draft context");
         try(var files=Files.walk(root)){for(Path p:files.sorted(Comparator.reverseOrder()).toList())Files.delete(p);}
         long[] loads={0,0,0};for(int i=0;i<10;i++)loads[ProxyBalance.choose(loads,i)]++;
         check(Arrays.stream(loads).max().orElseThrow()-Arrays.stream(loads).min().orElseThrow()<=1,"Even account allocation");
@@ -92,6 +104,26 @@ public final class RegressionChecks {
         check(!ApiFailure.response(400,"{\"error\":{\"message\":\"secret-test-key\"}}","secret-test-key").getMessage().contains("secret-test-key"),"API error redacts stored key");
         var wire=OmniClient.messages("system",List.of(new Conversation.Message("assistant","старый ответ"),new Conversation.Message("assistant","прогресс"),new Conversation.Message("user","продолжай")));
         check(wire.size()==4 && wire.get(1).getAsJsonObject().get("role").getAsString().equals("user") && wire.get(2).getAsJsonObject().get("content").getAsString().contains("прогресс"),"Truncated history and consecutive progress messages form alternating Gemini turns");
+        List<Conversation.Message> originalTurns=List.of(new Conversation.Message("user","спроектируй башню"));
+        JsonObject goodDraft=new JsonObject();goodDraft.addProperty("action","plan");goodDraft.add("plan",cube.source);
+        var repairCalls=new java.util.concurrent.atomic.AtomicInteger();var rejectionCalls=new java.util.concurrent.atomic.AtomicInteger();
+        var repaired=PlanRepair.ask("system",originalTurns,(system,turns)->{
+            int call=repairCalls.incrementAndGet();
+            if(call==1)return invalidDraft.deepCopy();
+            check(turns.size()==3 && turns.get(1).content().equals(invalidDraft.toString()) && turns.getLast().content().contains("Операция 1"),"Model receives its whole rejected draft and the precise failing operation");
+            return goodDraft.deepCopy();
+        },(attempt,response,reason)->{rejectionCalls.incrementAndGet();check(attempt==1 && reason.contains("0..95"),"Rejected world coordinates produce an actionable repair diagnostic");});
+        check(repaired.plan().cells.equals(cube.cells) && repairCalls.get()==2 && rejectionCalls.get()==1 && originalTurns.size()==1,"Only a corrected blueprint leaves the repair loop; caller history is immutable");
+        repairCalls.set(0);rejectionCalls.set(0);
+        try{PlanRepair.ask("system",originalTurns,(system,turns)->{repairCalls.incrementAndGet();return invalidDraft.deepCopy();},(attempt,response,reason)->rejectionCalls.incrementAndGet());throw new AssertionError("Invalid drafts retried forever");}catch(PlanRepair.InvalidPlan expected){check(repairCalls.get()==3 && rejectionCalls.get()==3,"Model repairs are bounded to two follow-up requests");}
+        repairCalls.set(0);
+        var lastRejected=new java.util.concurrent.atomic.AtomicReference<JsonObject>();
+        try{PlanRepair.ask("system",originalTurns,(system,turns)->{if(repairCalls.incrementAndGet()==1)return invalidDraft.deepCopy();JsonObject unsafe=new JsonObject();unsafe.addProperty("action","start");return unsafe;},(attempt,response,reason)->lastRejected.set(response));throw new AssertionError("Repair started construction");}catch(PlanRepair.InvalidPlan expected){check(repairCalls.get()==3,"A corrective model response cannot start construction or issue another action");}
+        check(lastRejected.get().equals(invalidDraft),"A non-plan corrective response cannot erase the recoverable blueprint draft");
+        repairCalls.set(0);JsonObject explanation=new JsonObject();explanation.addProperty("action","chat");explanation.addProperty("reply","Давай согласуем отдельные части.");
+        check(PlanRepair.ask("system",originalTurns,(system,turns)->repairCalls.incrementAndGet()==1?invalidDraft.deepCopy():explanation,(attempt,response,reason)->{}).plan()==null && repairCalls.get()==2,"An oversized design can be discussed instead of silently cropped or applied");
+        repairCalls.set(0);
+        try{PlanRepair.ask("system",originalTurns,(system,turns)->{repairCalls.incrementAndGet();return invalidDraft.deepCopy();},(attempt,response,reason)->Thread.currentThread().interrupt());throw new AssertionError("Cancelled repair sent another request");}catch(InterruptedException expected){check(repairCalls.get()==1,"Cancelling a rejected draft prevents another provider request");}finally{Thread.interrupted();}
         ProgressWatch watch=new ProgressWatch();watch.observe(20,false,false,20);
         boolean waitingSafe=true;for(int i=0;i<300;i++)waitingSafe&=!watch.observe(20,false,true,20);check(waitingSafe,"Resource wait does not pause construction");
         boolean delaySafe=true;for(int i=0;i<9;i++)delaySafe&=!watch.observe(20,false,false,20);check(delaySafe,"Short build delay tolerated");
